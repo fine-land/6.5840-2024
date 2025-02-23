@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 //
 // example to show how to declare the arguments
@@ -23,7 +25,46 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type RPCHandlerArgs struct {
+}
 
+type RPCHandlerReply struct {
+	TaskId   int
+	File     string // input file, for mapper
+	NReduce  int    //Reduce nums
+	TaskType int
+}
+
+// 监视整个mr执行阶段
+const (
+	Mapper = iota
+	Reducer
+	Done
+)
+
+// map/reduce 任务的状态
+const (
+	NotYetStarted = iota
+	InProgess
+	Finished
+)
+
+// TaskType
+const (
+	Map = iota
+	Reduce
+	AllDone
+	Wait
+)
+
+type FinishArgs struct {
+	TaskId   int
+	TaskType int //Map, Reduce
+
+}
+
+type FinishReply struct {
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
