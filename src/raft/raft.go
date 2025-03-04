@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -27,7 +28,6 @@ import (
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 )
-
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -62,7 +62,33 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	//persistent state on all servers
+	currentTerm int        //当前服务器的term
+	votedFor    int        //存放投票给哪个服务器了
+	log         []LogEntry //从1开始
+	loglength   int
+
+	commitIndex int
+	lastApplied int //最高的被应用到状态机的下标；用于follower提交到application
+
+	nextIndex  []int //对每个follower维护一个nextIndex，指向下一个要发送的log下标
+	matchIndex []int
+
+	electionTimeout time.Time //选举超时时间
+	voteTimeout     time.Time //投票超时时间
+	state           int       //Follower, Candidate, Leader?
 }
+
+type LogEntry struct {
+	op   interface{}
+	term int
+}
+
+const (
+	Follower = iota
+	Candidate
+	Leader
+)
 
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -71,6 +97,15 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	if rf.state == Leader {
+		isleader = true
+	} else {
+		isleader = false
+	}
+
 	return term, isleader
 }
 
@@ -92,7 +127,6 @@ func (rf *Raft) persist() {
 	// rf.persister.Save(raftstate, nil)
 }
 
-
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -113,7 +147,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -123,22 +156,84 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
+// only send by Candidate!! use for Leader Election &&
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	CandidiateTerm int //Candidate的term
+	CandidateId    int //Candidate的id，用于votedfor
+	LastLogIndex   int //Candidate的日志至少和其他服务器的一样新！,否则拒绝投票给Candidate
+	LastLogTerm    int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	Term        int  //Candidate是否需要更新term？
+	VoteGranted bool //是否投票？
+}
+
+type AppendEntriesArgs struct {
+	Term int //Leader term
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
 }
 
 // example RequestVote RPC handler.
+// 这个函数是RequestVote处理函数，当Candidate发送RPC后，其他服务器会调用这个函数；
+// 当前服务器有三种状态，Leader，Candidate，Follower
+// Leader:如果args.CandidateTerm比自己的新，直接变成Follower，然后投票；如果args.Term <= term
+// 拒绝投票
+// Candidate：args.term <= term, 拒绝投票，因为Candidate默认投票给自己
+// args.term > term, 退回Follower，然后投票
+// Follower: 如果term或日志不够新，拒绝投票
+// 同时还要防止重复投票
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	//怎么样才会投票？
+	//至少args的日志和此服务器的一样新；
+	//Term至少一样新
+	//如果args的term不够新，直接拒绝投票！
+
+	if rf.state == Leader || rf.state == Candidate {
+		if args.CandidiateTerm <= rf.currentTerm {
+			reply.VoteGranted = false
+			reply.Term = rf.currentTerm
+			return
+		} else {
+			WhenStateChanged(rf.me, rf.state, Follower) //log
+			rf.state = Follower
+		}
+	}
+
+	if args.CandidiateTerm < rf.currentTerm {
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+	}
+	//日志必须足够新
+	//term相同，长的更新
+	//term不同，term大的更新
+	lastlogindex := rf.loglength
+	lastlogterm := rf.log[rf.loglength].term
+	if (args.LastLogTerm < lastlogterm) ||
+		(args.CandidiateTerm == lastlogterm && args.LastLogIndex < lastlogindex) {
+		reply.VoteGranted = false
+		return
+	}
+	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+		//已经投过票了，且不是投给的这个服务器
+		reply.VoteGranted = false
+	}
+
+	rf.votedFor = args.CandidateId
+	reply.VoteGranted = true
+	fmt.Printf("[VoteRequest]: server[%d] vote for candidate[%d], term is [%d]\n", rf.me, args.CandidateId, args.CandidiateTerm)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -173,6 +268,46 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) AppendEntries() {
+	for {
+		args := AppendEntriesArgs{
+			Term: rf.currentTerm,
+		}
+		reply := AppendEntriesReply{}
+		rf.mu.Lock()
+		for i := range rf.peers {
+			if i != rf.me {
+				if rf.state == Leader {
+					break
+				}
+				for !rf.peers[i].Call("Raft.AppendEntriesHandler", args, reply) {
+				}
+				if reply.Success == false {
+					if reply.Term > rf.currentTerm {
+						rf.state = Follower
+						break
+					}
+				}
+			}
+		}
+		rf.mu.Unlock()
+
+		time.Sleep(200 * time.Millisecond) //5times per second; 200ms*5 = 1s
+	}
+
+}
+
+func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+	ResetTicker()
+
+}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -192,7 +327,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
-
 
 	return index, term, isLeader
 }
@@ -216,12 +350,50 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) Execute() {
+	for rf.killed() == false {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		rf.currentTerm++
+
+		if rf.state == Follower {
+			//ElectionTimeout
+			WhenStateChanged(rf.me, Follower, Candidate)
+			rf.state = Candidate
+		}
+		votes := 1                      //vote for itself
+		majority := len(rf.peers)/2 + 1 //assert odd servers
+		for i := range rf.peers {
+			if i != rf.me {
+				args := RequestVoteArgs{
+					CandidiateTerm: rf.currentTerm,
+					CandidateId:    rf.me,
+					LastLogIndex:   rf.loglength,
+					LastLogTerm:    rf.log[rf.loglength].term,
+				}
+				reply := RequestVoteReply{}
+				for !rf.sendRequestVote(i, &args, &reply) {
+				}
+				if reply.Term > rf.currentTerm {
+					//如果发现某个人的term大于自己，进入follower
+					rf.currentTerm = reply.Term
+					WhenStateChanged(rf.me, rf.state, Follower)
+					rf.state = Follower
+					break
+				}
+			}
+		}
+	}
+}
+
+// 这个ticker包括两个timeout；
+// 如果状态是Follower, 切换成Candidate，开始Election
+// 如果状态是Candidate，直接进入ReElection
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
-
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -247,13 +419,22 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	rf.currentTerm = 0
+	rf.votedFor = -1 //null
+	rf.log = make([]LogEntry, 0)
+	rf.loglength = 0
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.state = Follower
 
+	go rf.Execute()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
