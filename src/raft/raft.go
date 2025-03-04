@@ -19,7 +19,7 @@ package raft
 
 import (
 	//	"bytes"
-	"fmt"
+
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -121,6 +121,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//Term至少一样新
 	//如果args的term不够新，直接拒绝投票！
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("[VoteRequest]: server[%d]Term[%d] ask vote from server[%d]Term[%d]\n", args.CandidateId, args.CandidiateTerm, rf.me, rf.currentTerm)
+
+	//如果是Leader或者Candidate收到投票请求:
+	//查看term，如果term小于对方的term
+	//转换成Follower状态，然后执行Follower的逻辑
+	//如果term大于等于对方的term，拒绝投票
+	//并把自己的term放入reply
 	if rf.state == Leader || rf.state == Candidate {
 		if args.CandidiateTerm <= rf.currentTerm {
 			reply.VoteGranted = false
@@ -153,8 +162,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	rf.votedFor = args.CandidateId
+	//this line use for labrpc warning
+	//reply.Term = rf.currentTerm          //把自己的老term返回去，maybe有用???
+	rf.currentTerm = args.CandidiateTerm //更新自己的term
 	reply.VoteGranted = true
-	fmt.Printf("[VoteRequest]: server[%d] vote for candidate[%d], term is [%d]\n", rf.me, args.CandidateId, args.CandidiateTerm)
+	//一旦在该term里投过票，不应该进入Candidate？？？
+	rf.resetTimeout()
+	//fmt.Printf("[VoteRequest]: server[%d] vote for candidate[%d], term is [%d]\n", rf.me, args.CandidateId, args.CandidiateTerm)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -196,16 +210,23 @@ func (rf *Raft) AppendEntries() {
 			rf.cond.Wait()
 		}
 		args := AppendEntriesArgs{
-			Term: rf.currentTerm,
+			Term:     rf.currentTerm,
+			LeaderId: rf.me,
 		}
 		rf.mu.Unlock()
 		reply := AppendEntriesReply{}
 		for i := range rf.peers {
 			if i != rf.me {
+				rf.mu.Lock()
+				DPrintf("[AppendEntries]: server[%d]Term[%d] AE for server[%d]\n", rf.me, rf.currentTerm, i)
+				rf.mu.Unlock()
 				for !rf.peers[i].Call("Raft.AppendEntriesHandler", &args, &reply) {
 				}
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
+					DPrintf("[AppendEntries]: server[%d]Term[%d] get max Term from server[%d]Term[%d]\n", rf.me, rf.currentTerm, i, reply.Term)
+					rf.currentTerm = reply.Term
+					WhenStateChanged(i, rf.state, Follower)
 					rf.state = Follower
 					break
 				}
@@ -221,6 +242,7 @@ func (rf *Raft) AppendEntries() {
 func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf("[AppendEntriesHandler]: server[%d]Term[%d] get AE from server[%d]Term[%d]\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -245,6 +267,8 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	index := -1
 	term := -1
 	isLeader := true
@@ -273,6 +297,9 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// 这里少了一步关键步骤，如果在VoteRequest请求过程中，丢包之类的；
+// 导致花费太多时间，超过超时时间；此时应该立刻中断此次选举，重新进行选举
+// 但这个实现没有解决这个问题
 func (rf *Raft) election() {
 	//Start Leader Election
 	rf.mu.Lock()
@@ -299,12 +326,16 @@ func (rf *Raft) election() {
 
 	rf.mu.Unlock()
 
+	//这里不能使用for循环；因为有可能一个服务器崩了；导致一直接收不到RPC；
 	for i := range rf.peers {
 		if i != rf.me {
-			for !rf.peers[i].Call("Raft.RequestVote", &args, &reply) {
+			ok := rf.peers[i].Call("Raft.RequestVote", &args, &reply)
+			if !ok {
+				DPrintf("[VoteRequest] sever[%d]--> server[%d] lost VoteRequestRPC, maybe crashed", rf.me, i)
+				continue
 			}
 			rf.mu.Lock()
-			//一旦发现由服务器的日志大于自己，投个钩子；直接变成Follower
+			//如果term小，不用看了
 			if reply.Term > rf.currentTerm {
 				WhenStateChanged(rf.me, rf.state, Follower)
 				rf.state = Follower
@@ -314,7 +345,21 @@ func (rf *Raft) election() {
 			}
 			rf.mu.Unlock()
 		}
+
+		//得票超过一半
+		//if vote >= majority {
+		//	Assert(true, "get majority votes")
+		//	rf.mu.Lock()
+		//	WhenStateChanged(rf.me, rf.state, Leader)
+		//	rf.state = Leader
+		//	rf.mu.Unlock()
+		//	//马上发送AppendEntries去抑制其他服务器
+		//	rf.cond.Signal()
+		//	break
+		//}
+
 	}
+
 	if vote >= majority {
 		Assert(true, "get majority votes")
 		rf.mu.Lock()
@@ -324,10 +369,11 @@ func (rf *Raft) election() {
 		//马上发送AppendEntries去抑制其他服务器
 		rf.cond.Signal()
 	}
+
 }
 
 func (rf *Raft) resetTimeout() {
-	ms := 50 + (rand.Int63() % 300)
+	ms := 150 + (rand.Int63() % 150)
 	rf.electionTimeout = time.Now().Add(time.Duration(ms) * time.Millisecond) //wait
 }
 
@@ -338,13 +384,15 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		if time.Now().After(rf.electionTimeout) {
-			rf.election()     //Hold
-			rf.resetTimeout() //Hold
+			DPrintf("server[%d]: electiontimeout, time for election", rf.me)
+			rf.election() //Hold Lock
+			rf.mu.Lock()
+			rf.resetTimeout() //这个函数不能持有锁；因为在AppendEntriesHandler会持有锁调用这个函数，
+			rf.mu.Unlock()
 		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		//ms := 50 + (rand.Int63() % 300)
-		ms := 50
+		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }

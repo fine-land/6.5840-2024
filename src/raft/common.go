@@ -79,7 +79,8 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term int //Leader term
+	Term     int //Leader term
+	LeaderId int
 }
 
 type AppendEntriesReply struct {
