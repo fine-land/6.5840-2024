@@ -1,25 +1,23 @@
 package raft
 
 import (
-	"fmt"
 	"log"
 )
 
 // Debugging
 const Debug = false
 
+// 收到RPC，[R]
+// 发送RPC， [S]
+// [ID][TERM]: STATE1 <-- STATE2
+// [VOTE]: [ID][TERM] <-- [ID][TERM]
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
 		log.Printf(format, a...)
 	}
 }
 
-func Assert(condition bool, discription string) {
-	if !condition {
-		log.Fatalf("assert [%v] failure", discription)
-	}
-}
-
+/*
 var stateNames = map[int]string{
 	Follower:  "Follower",
 	Candidate: "Candidate",
@@ -40,3 +38,4 @@ func WhenStateChanged(id int, old int, new int) {
 	fmt.Printf("server [%d] State transition: [%s] -> [%s]\n", id, stateNames[old], stateNames[new])
 
 }
+*/
