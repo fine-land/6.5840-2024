@@ -41,10 +41,9 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	//persistent state on all servers
-	currentTerm  int        //当前服务器的term
-	votedFor     int        //存放投票给哪个服务器了
-	log          []LogEntry //从1开始
-	lastLogIndex int        //用于日志同步
+	currentTerm int        //当前服务器的term
+	votedFor    int        //存放投票给哪个服务器了
+	log         []LogEntry //从1开始
 
 	commitIndex int //当前已经commit过的最高id？
 	lastApplied int //最高的被应用到状态机的下标；用于follower提交到application
@@ -54,6 +53,7 @@ type Raft struct {
 
 	electionTimeout time.Time //选举超时时间
 	state           int       //Follower, Candidate, Leader?
+	cond            *sync.Cond
 }
 
 type LogEntry struct {
@@ -92,6 +92,7 @@ type AppendEntriesArgs struct {
 	PrevLogIndex int
 	PrevLogTerm  int
 	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -104,4 +105,36 @@ func (rf *Raft) updateNextIndexNon() {
 	for i, _ := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
 	}
+}
+
+func maxNumber(x1, x2 int) int {
+	if x1 < x2 {
+		return x1
+	} else {
+		return x2
+	}
+}
+
+// 不需要上锁
+func (rf *Raft) tryUpdateCommitIndexNon() {
+	maxMatchIndex := -1
+	for _, v := range rf.matchIndex {
+		maxMatchIndex = maxNumber(maxMatchIndex, v)
+	}
+
+	for N := maxMatchIndex; N > rf.commitIndex; N-- {
+		count := 0
+		for _, v := range rf.matchIndex {
+			if v >= N {
+				count++
+			}
+		}
+		if count > len(rf.peers)/2 && rf.log[N].Term == rf.currentTerm {
+			rf.commitIndex = N
+			return
+		}
+
+	}
+
+	rf.cond.Signal()
 }

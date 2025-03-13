@@ -17,6 +17,14 @@ func DPrintf(format string, a ...interface{}) {
 	}
 }
 
+func minNumber(x1, x2 int) int {
+	if x1 < x2 {
+		return x1
+	} else {
+		return x2
+	}
+}
+
 /*
 var stateNames = map[int]string{
 	Follower:  "Follower",
