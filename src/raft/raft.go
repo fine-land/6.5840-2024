@@ -186,7 +186,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 
 	if rf.state != Leader {
-		DPrintf("not leader, just return\n")
+		DPrintf("server[%d]Term[%d] not leader, just return\n", rf.me, rf.currentTerm)
 		return -1, -1, false
 	}
 
@@ -215,6 +215,7 @@ func (rf *Raft) sendAppendEntries() {
 				Entries:      rf.log[rf.nextIndex[i]:], //[rf.nextIndex ...]
 				LeaderCommit: rf.commitIndex,
 			}
+			DPrintf("server[%d]Term[%d] --> AElog for server[%d]\n", rf.me, rf.currentTerm, i)
 			go rf.appendEntriesWithEntries(i, &args)
 		}
 	}
@@ -233,6 +234,7 @@ func (rf *Raft) appendEntriesWithEntries(serverId int, args *AppendEntriesArgs) 
 
 	//防止过去太长时间
 	if args.Term == rf.currentTerm && rf.state == Leader {
+		DPrintf("[AE]: server[%d] handler reply of server[%d] log", rf.me, serverId)
 		if reply.Success {
 			rf.nextIndex[serverId] = len(rf.log)
 			rf.matchIndex[serverId] = len(rf.log) - 1
@@ -373,7 +375,7 @@ func (rf *Raft) sendHeartBeats() {
 					Entries:      make([]LogEntry, 0), //empty entries for heartbeat
 					LeaderCommit: rf.commitIndex,
 				}
-				DPrintf("i am server[%d], send AE for server[%d]\n", rf.me, i)
+				DPrintf("i am server[%d], send HeartBeat for server[%d]\n", rf.me, i)
 				go rf.appendEntries(i, &args)
 			}
 		}
@@ -419,6 +421,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 
 	//5.3
 	if len(rf.log)-1 < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		DPrintf("[AEH]: consistency fail")
 		reply.Success = false
 		return
 	}
@@ -429,10 +432,16 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 			rf.log = append(rf.log, args.Entries[i:]...)
 		}
 	}  */
+
+	//use for debug
+	if len(args.Entries) > 0 {
+		a := 0
+		a++
+	}
 	logIndex := args.PrevLogIndex + 1 // 下一个要追加的日志索引
 	for i, entry := range args.Entries {
 		entryIndex := logIndex + i
-		if entryIndex <= len(rf.log) {
+		if entryIndex < len(rf.log) {
 			// 检查任期是否冲突
 			if rf.log[entryIndex-1].Term != entry.Term {
 				// 冲突，删除从 entryIndex 开始的所有条目
@@ -455,7 +464,10 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = minNumber(args.LeaderCommit, len(rf.log)-1)
+		rf.cond.Signal()
 	}
+
+	DPrintf("[AEH]: server[%d] append log success, log len is [%d]\n", rf.me, len(rf.log))
 
 	if rf.currentTerm < args.Term {
 		rf.votedFor = -1
@@ -503,6 +515,7 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 		rf.mu.Unlock()
 
 		for rf.commitIndex > rf.lastApplied {
+			DPrintf("server[%d]Term[%d] apply command, rf.commitIndex is [%d]\n", rf.me, rf.currentTerm, rf.commitIndex)
 			rf.mu.Lock()
 			rf.lastApplied++
 			msg := ApplyMsg{

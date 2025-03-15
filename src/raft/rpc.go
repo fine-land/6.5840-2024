@@ -108,7 +108,7 @@ func (rf *Raft) updateNextIndexNon() {
 }
 
 func maxNumber(x1, x2 int) int {
-	if x1 < x2 {
+	if x1 > x2 {
 		return x1
 	} else {
 		return x2
@@ -116,7 +116,9 @@ func maxNumber(x1, x2 int) int {
 }
 
 // 不需要上锁
+// leader自己的matchIndex就是len(rf.log)-1
 func (rf *Raft) tryUpdateCommitIndexNon() {
+	rf.matchIndex[rf.me] = len(rf.log) - 1
 	maxMatchIndex := -1
 	for _, v := range rf.matchIndex {
 		maxMatchIndex = maxNumber(maxMatchIndex, v)
@@ -131,7 +133,6 @@ func (rf *Raft) tryUpdateCommitIndexNon() {
 		}
 		if count > len(rf.peers)/2 && rf.log[N].Term == rf.currentTerm {
 			rf.commitIndex = N
-			return
 		}
 
 	}
