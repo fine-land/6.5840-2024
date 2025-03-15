@@ -195,6 +195,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term: rf.currentTerm,
 	}
 	rf.log = append(rf.log, newlog)
+	rf.nextIndex[rf.me] = len(rf.log)
+	rf.matchIndex[rf.me] = len(rf.log) - 1
 	DPrintf("[Start]: server[%d]state[%d] get log, log len[%d]\n", rf.me, rf.state, len(rf.log))
 
 	go rf.sendAppendEntries()
@@ -228,7 +230,9 @@ func (rf *Raft) appendEntriesWithEntries(serverId int, args *AppendEntriesArgs) 
 	//所以我的想法是，即使一直发送，发送成功时，如果当前服务器不是leader了，那么
 	//在下面的逻辑中也不会处理
 	for !rf.peers[serverId].Call("Raft.AppendEntriesHandler", args, &reply) {
+		time.Sleep(time.Duration(5) * time.Millisecond)
 	}
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -324,6 +328,7 @@ func (rf *Raft) callSendRequestVote(vote *int, args *RequestVoteArgs, serverId i
 			if *vote > len(rf.peers)/2 && rf.state != Leader /* only one go routines heartbeat*/ {
 				//became leader,AE
 				rf.state = Leader
+				DPrintf3B("server[%d] became leader\n", rf.me)
 				rf.updateNextIndexNon()
 				DPrintf("server[%d]Term[%d] became leader\n", rf.me, rf.currentTerm)
 				rf.resetNon()
@@ -443,9 +448,9 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 		entryIndex := logIndex + i
 		if entryIndex < len(rf.log) {
 			// 检查任期是否冲突
-			if rf.log[entryIndex-1].Term != entry.Term {
+			if rf.log[entryIndex].Term != entry.Term {
 				// 冲突，删除从 entryIndex 开始的所有条目
-				rf.log = rf.log[:entryIndex-1]
+				rf.log = rf.log[:entryIndex]
 				// 将剩余的 entries 追加到 rf.log
 				rf.log = append(rf.log, args.Entries[i:]...)
 				break
@@ -458,7 +463,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	}
 
 	//如果一开始就大于本地日志，直接追加
-	if logIndex > len(rf.log) {
+	if logIndex >= len(rf.log) {
 		rf.log = append(rf.log, args.Entries...)
 	}
 
@@ -526,7 +531,9 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 
 			rf.mu.Unlock()
 			ApplyCh <- msg
+
 		}
+		rf.PrintLog()
 	}
 }
 

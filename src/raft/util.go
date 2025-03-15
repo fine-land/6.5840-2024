@@ -17,6 +17,23 @@ func DPrintf(format string, a ...interface{}) {
 	}
 }
 
+const Debug3B = false
+
+func DPrintf3B(format string, a ...interface{}) {
+	if Debug3B {
+		log.Printf(format, a...)
+	}
+}
+
+func (rf *Raft) PrintLog() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf3B("server[%d] log len[%d], log is :\n", rf.me, len(rf.log)-1)
+	for _, v := range rf.log {
+		DPrintf3B("%v ", v)
+	}
+}
+
 func minNumber(x1, x2 int) int {
 	if x1 < x2 {
 		return x1
