@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 )
 
@@ -26,8 +27,6 @@ func DPrintf3B(format string, a ...interface{}) {
 }
 
 func (rf *Raft) PrintLog() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	DPrintf3B("server[%d] log len[%d], log is :\n", rf.me, len(rf.log)-1)
 	for _, v := range rf.log {
 		DPrintf3B("%v ", v)
@@ -40,6 +39,17 @@ func minNumber(x1, x2 int) int {
 	} else {
 		return x2
 	}
+}
+
+func (args AppendEntriesArgs) String() string {
+	s := fmt.Sprintf("Term[%d] LeaderId[%d] PrevLogIndex[%d] PrevLogTerm[%d] LeaderCommit[%d]\n", args.Term,
+		args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
+
+	for _, v := range args.Entries {
+		s += fmt.Sprintf("command[%v] Term[%d]\n", v.Op, v.Term)
+	}
+	return s
+
 }
 
 /*
