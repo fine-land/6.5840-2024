@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -64,6 +66,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -84,6 +93,30 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+
+	flag := false
+	if d.Decode(&currentTerm) != nil {
+		flag = true
+		DPrintf3C("decode currentTerm fail\n")
+	}
+	if d.Decode(&votedFor) != nil {
+		flag = true
+		DPrintf3C("decode votedfor fail\n")
+	}
+	if d.Decode(&log) != nil {
+		flag = true
+		DPrintf3C("decode log fail\n")
+	}
+	if !flag {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log[:]
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -119,6 +152,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = Follower
 		rf.votedFor = -1
 		rf.currentTerm = args.CandidiateTerm
+		//persist
+		rf.persist()
 	}
 
 	lastLogIndex := len(rf.log) - 1
@@ -127,6 +162,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && up2date {
 		DPrintf("[VOTEGRAND]: server[%d]Term[%d] --> server[%d]Term[%d]\n", rf.me, rf.currentTerm, args.CandidateId, args.CandidiateTerm)
 		rf.votedFor = args.CandidateId
+
+		//persist
+		rf.persist()
+
 		reply.VoteGranted = true
 
 		//一旦投过票，证明在这个term内，自己是不能成为leader
@@ -198,6 +237,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term: rf.currentTerm,
 	}
 	rf.log = append(rf.log, newlog)
+	//persist
+	rf.persist()
 	rf.nextIndex[rf.me] = len(rf.log)
 	rf.matchIndex[rf.me] = len(rf.log) - 1
 	DPrintf3B("[Start]: server[%d]state[%d] get log, log len[%d], get log[%v]\n", rf.me, rf.state, len(rf.log)-1, command)
@@ -270,6 +311,8 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 				rf.state = Follower
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
+				//persist
+				rf.persist()
 				//一旦不是leader，调整完毕直接退出AE
 				DPrintf3B("server[%d]Term[%d] not leader now\n", rf.me, rf.currentTerm)
 				return
@@ -362,6 +405,8 @@ func (rf *Raft) callSendRequestVote(vote *int, args *RequestVoteArgs, serverId i
 		rf.state = Follower
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
+		//persist
+		rf.persist()
 	}
 	//收到reply，可能过去很长时间；确认term没有改变
 	if rf.currentTerm == args.CandidiateTerm && rf.state == Candidate {
@@ -391,6 +436,9 @@ func (rf *Raft) checkConsistency() {
 func (rf *Raft) electionNon() {
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	//persist
+	rf.persist()
+
 	rf.state = Candidate
 	vote := 1
 
@@ -521,6 +569,8 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 		if args.Entries[logEntryIndex].Term != rf.log[logIndex].Term {
 			//conflict
 			rf.log = rf.log[:logIndex]
+			//persist
+			rf.persist()
 			conflict = true
 			break
 		}
@@ -530,6 +580,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 
 	if conflict {
 		rf.log = append(rf.log, args.Entries[logEntryIndex:]...)
+		rf.persist()
 	} else {
 		//no conflict
 		if logEntryIndex == len(args.Entries) && logIndex == len(rf.log) {
@@ -538,6 +589,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 			//do nothing
 		} else if logIndex == len(rf.log) {
 			rf.log = append(rf.log, args.Entries[logEntryIndex:]...)
+			rf.persist()
 		}
 	}
 
@@ -553,6 +605,8 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	if rf.currentTerm < args.Term {
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
+		//persist
+		rf.persist()
 	}
 
 	rf.state = Follower

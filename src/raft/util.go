@@ -26,6 +26,14 @@ func DPrintf3B(format string, a ...interface{}) {
 	}
 }
 
+const Debug3C = false
+
+func DPrintf3C(format string, a ...interface{}) {
+	if Debug3C {
+		log.Printf(format, a...)
+	}
+}
+
 func (rf *Raft) PrintLog() {
 	DPrintf3B("server[%d] log len[%d], log is :\n", rf.me, len(rf.log)-1)
 	for _, v := range rf.log {
