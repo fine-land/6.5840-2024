@@ -98,6 +98,11 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	//three member for roll back quickly
+	XTerm  int
+	XIndex int
+	XLen   int
 }
 
 // non hold lock

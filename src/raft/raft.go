@@ -279,7 +279,24 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 				if rf.nextIndex[serverId] == 1 {
 					return
 				}
-				rf.nextIndex[serverId]--
+				//rf.nextIndex[serverId]--
+				if reply.XTerm == -1 {
+					rf.nextIndex[serverId] = reply.XLen
+				} else {
+					//这里可以二分查找来加速,wait to do
+					for i := args.PrevLogIndex; i >= 0; i-- {
+						if rf.log[i].Term > reply.XTerm {
+							continue
+						} else if rf.log[i].Term == reply.XTerm {
+							rf.nextIndex[serverId] = i
+							break
+						} else {
+							rf.nextIndex[serverId] = reply.XIndex
+							break
+						}
+					}
+				}
+
 				go rf.appendEntries(serverId, &AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
@@ -475,6 +492,20 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	if len(rf.log)-1 < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("[AEH]: consistency fail")
 		reply.Success = false
+
+		//roll back quickly,XTerm,XIndex,XLen
+		if len(rf.log)-1 < args.PrevLogIndex {
+			reply.XTerm = -1
+			reply.XLen = len(rf.log)
+		} else {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			for i := args.PrevLogIndex; i >= 0; i-- {
+				if rf.log[i].Term != reply.XTerm {
+					reply.XIndex = i + 1
+					break
+				}
+			}
+		}
 		return
 	}
 	//不能直接append，因为有可能出现一个bug：{1， 103，102}日志和{1， 103}日志同时发送过来；
