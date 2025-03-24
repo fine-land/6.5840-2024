@@ -106,9 +106,12 @@ type AppendEntriesReply struct {
 }
 
 // non hold lock
+// fix bugs
+// 每次选举成功都要重新初始化
 func (rf *Raft) updateNextIndexNon() {
 	for i, _ := range rf.peers {
 		rf.nextIndex[i] = len(rf.log)
+		rf.matchIndex[i] = 0
 	}
 }
 
@@ -123,6 +126,7 @@ func maxNumber(x1, x2 int) int {
 // 不需要上锁
 // leader自己的matchIndex就是len(rf.log)-1
 func (rf *Raft) tryUpdateCommitIndexNon() {
+	PrettyDebug(dLeader, "S%d,term=%d,updatecommit index before=%d", rf.me, rf.currentTerm, rf.commitIndex)
 	rf.matchIndex[rf.me] = len(rf.log) - 1
 	maxMatchIndex := -1
 	for _, v := range rf.matchIndex {
@@ -138,9 +142,10 @@ func (rf *Raft) tryUpdateCommitIndexNon() {
 		}
 		if count > len(rf.peers)/2 && rf.log[N].Term == rf.currentTerm {
 			rf.commitIndex = N
+			break
 		}
 
 	}
-
+	PrettyDebug(dLeader, "S%d,term=%d,updatecommit index after=%d", rf.me, rf.currentTerm, rf.commitIndex)
 	rf.cond.Signal()
 }

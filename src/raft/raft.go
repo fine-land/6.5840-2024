@@ -93,6 +93,9 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var currentTerm int
@@ -115,8 +118,14 @@ func (rf *Raft) readPersist(data []byte) {
 	if !flag {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.log = log[:]
+		rf.log = log
 	}
+}
+
+func (rf *Raft) trimLogFromX(X int) {
+	log := rf.log[0:1]
+	log = append(log, rf.log[X:]...)
+	rf.log = log
 }
 
 // the service says it has created a snapshot that has
@@ -125,7 +134,7 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-
+	rf.trimLogFromX(0)
 }
 
 // example RequestVote RPC handler.
@@ -140,42 +149,42 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
+	PrettyDebug(dVote, "S%d -> S%d, tryvote", rf.me, args.CandidateId)
 	if args.CandidiateTerm < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		PrettyDebug(dVote, "S%d term%d < S%d term%d, 拒绝投票", args.CandidateId, args.CandidiateTerm, rf.me, rf.currentTerm)
 		return
 	}
 
 	//for debug message
 	reply.Term = rf.currentTerm
 	if args.CandidiateTerm > rf.currentTerm {
+		PrettyDebug(dTerm, "S%d term%d->term%d, state=Follower", rf.me, rf.currentTerm, args.CandidiateTerm)
 		rf.state = Follower
 		rf.votedFor = -1
 		rf.currentTerm = args.CandidiateTerm
 		//persist
-		rf.persist()
 	}
 
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
 	up2date := (args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex))
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && up2date {
-		DPrintf("[VOTEGRAND]: server[%d]Term[%d] --> server[%d]Term[%d]\n", rf.me, rf.currentTerm, args.CandidateId, args.CandidiateTerm)
 		rf.votedFor = args.CandidateId
-
 		//persist
-		rf.persist()
-
 		reply.VoteGranted = true
-
 		//一旦投过票，证明在这个term内，自己是不能成为leader
 		//最好进行一次reset
 		rf.resetNon()
+		PrettyDebug(dVote, "S%d -> S%d,term=%d, vote success", rf.me, args.CandidateId, args.CandidiateTerm)
 		return
 	}
 
 	//something wrong happen
 	reply.VoteGranted = false
+	PrettyDebug(dVote, "S%d -> S%d, term=%d, something wrong happen", rf.me, args.CandidateId, rf.currentTerm)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -228,7 +237,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 
 	if rf.state != Leader {
-		DPrintf("server[%d]Term[%d] not leader, just return\n", rf.me, rf.currentTerm)
 		return -1, -1, false
 	}
 
@@ -237,11 +245,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term: rf.currentTerm,
 	}
 	rf.log = append(rf.log, newlog)
-	//persist
 	rf.persist()
+	//DPrintf3C("[START]: server[%d]Term[%d] get log [%d]\n", rf.me, rf.currentTerm, command)
+	PrettyDebug(dLeader, "S%d, term=%d, start log %d, log len %d", rf.me, rf.currentTerm, command, len(rf.log)-1)
+	//persist
 	rf.nextIndex[rf.me] = len(rf.log)
 	rf.matchIndex[rf.me] = len(rf.log) - 1
-	DPrintf3B("[Start]: server[%d]state[%d] get log, log len[%d], get log[%v]\n", rf.me, rf.state, len(rf.log)-1, command)
 
 	go rf.sendAppendEntries()
 	return len(rf.log) - 1, rf.currentTerm, true
@@ -252,6 +261,12 @@ func (rf *Raft) sendAppendEntries() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	for i, _ := range rf.peers {
+		//bug here
+		//if leader became follower with higher term,
+		//can exe this function!
+		if rf.state != Leader {
+			return
+		}
 		if i != rf.me && len(rf.log)-1 >= rf.nextIndex[i] {
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
@@ -261,13 +276,15 @@ func (rf *Raft) sendAppendEntries() {
 				Entries:      rf.log[rf.nextIndex[i]:], //[rf.nextIndex ...]
 				LeaderCommit: rf.commitIndex,
 			}
-			DPrintf("server[%d]Term[%d] --> AElog for server[%d]\n", rf.me, rf.currentTerm, i)
-			go rf.appendEntries(i, &args)
+			DPrintf3C("server[%d]Term[%d] --> AElog for server[%d]\n", rf.me, rf.currentTerm, i)
+			PrettyDebug(dLeader, "S%d->S%d, term=%d, logappend, prevlogindex=%d, prevlogterm=%d, entrieslen=%d, leadercommit=%d",
+				rf.me, i, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit)
+			go rf.appendEntries(i, args)
 		}
 	}
 }
 
-func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
+func (rf *Raft) appendEntries(serverId int, args AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
 	//这里如果当前服务器已经不是leader了，按照paper应当立刻停止发送；
 	//但是这样需要持有锁来检测当前服务器状态，但是发送RPC又不能持有锁；
@@ -276,14 +293,14 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 	//for !rf.peers[serverId].Call("Raft.AppendEntriesHandler", args, &reply) && rf.killed() == false {
 	//	time.Sleep(time.Duration(5) * time.Millisecond)
 	//}
-	ok := rf.peers[serverId].Call("Raft.AppendEntriesHandler", args, &reply)
+	ok := rf.peers[serverId].Call("Raft.AppendEntriesHandler", &args, &reply)
 	if !ok {
-		//DPrintf3B("send AE error")
 		return
 	}
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	//这里也有一个bug
 	//leader1网络分区后，重连回来，立刻发送两个heartbeat给其他服务器；
 	//但是发送给Follower的先回来，修改了此服务器的term，导致从leader返回的heartbeat无法被处理
@@ -292,7 +309,7 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 	if args.Term == rf.currentTerm && rf.state == Leader {
 		DPrintf("[AE]: server[%d] handler reply of server[%d] log", rf.me, serverId)
 		if reply.Success {
-
+			PrettyDebug(dLeader, "S%d->S%d, term=%d, logappend success", rf.me, serverId, args.Term)
 			//very small bug ,
 			//如果在返回的时候，leader又更新了log，就会出现问题
 			//rf.nextIndex[serverId] = len(rf.log)
@@ -305,24 +322,27 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 			if newMatchIndex > rf.matchIndex[serverId] {
 				rf.matchIndex[serverId] = newMatchIndex
 			}
-			rf.tryUpdateCommitIndexNon()
+			//rf.tryUpdateCommitIndexNon()
 		} else {
 			if reply.Term > rf.currentTerm {
+				PrettyDebug(dTerm, "S%d,term=%d,term=%d, state=Follower", rf.me, rf.currentTerm, reply.Term)
 				rf.state = Follower
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
+				DPrintf3C("server[%d]not leader now\n", rf.me)
 				//persist
-				rf.persist()
 				//一旦不是leader，调整完毕直接退出AE
-				DPrintf3B("server[%d]Term[%d] not leader now\n", rf.me, rf.currentTerm)
 				return
 			} else {
 				//这里由于日志不一致的错误，而非term的错误
 				//此时调整nextIndex，然后retry
+				PrettyDebug(dLeader, "S%d->S%d,term冲突,Xterm=%d,XIndex=%d,XLen=%d,nextIndex=%d",
+					rf.me, serverId, reply.XTerm, reply.XIndex, reply.XLen, rf.nextIndex[serverId])
 				if rf.nextIndex[serverId] == 1 {
 					return
 				}
 				//rf.nextIndex[serverId]--
+
 				if reply.XTerm == -1 {
 					rf.nextIndex[serverId] = reply.XLen
 				} else {
@@ -339,8 +359,10 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 						}
 					}
 				}
+				PrettyDebug(dLeader, "S%d->S%d,term冲突,Xterm=%d,XIndex=%d,XLen=%d,调整后nextIndex=%d",
+					rf.me, serverId, reply.XTerm, reply.XIndex, reply.XLen, rf.nextIndex[serverId])
 
-				go rf.appendEntries(serverId, &AppendEntriesArgs{
+				go rf.appendEntries(serverId, AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[serverId] - 1,
@@ -350,6 +372,8 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 				})
 			}
 		}
+
+		rf.tryUpdateCommitIndexNon()
 
 	}
 }
@@ -401,7 +425,7 @@ func (rf *Raft) callSendRequestVote(vote *int, args *RequestVoteArgs, serverId i
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.currentTerm < reply.Term {
-		DPrintf("[RV]: ID[%d]TERM[%d] <-- ID[%d]TERM[%d], get greater term\n", rf.me, rf.currentTerm, serverId, reply.Term)
+		PrettyDebug(dCandidate, "S%d<-S%d, term=%d,ask vote, 有更大的term%d, state=Follower", rf.me, serverId, rf.currentTerm, args.CandidiateTerm)
 		rf.state = Follower
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
@@ -413,14 +437,14 @@ func (rf *Raft) callSendRequestVote(vote *int, args *RequestVoteArgs, serverId i
 		if reply.VoteGranted {
 			*vote++
 			DPrintf("[VOTE]: server[%d]Term[%d] <-- server[%d]Term[%d]\n", rf.me, rf.currentTerm, serverId, reply.Term)
+			PrettyDebug(dCandidate, "S%d<-S%d,term=%d, 成功收到投票", rf.me, serverId, rf.currentTerm)
 			if *vote > len(rf.peers)/2 && rf.state != Leader /* only one go routines heartbeat*/ {
 				//became leader,AE
 				rf.state = Leader
-				DPrintf3B("server[%d] became leader\n", rf.me)
 				rf.updateNextIndexNon()
+				PrettyDebug(dLeader, "S%d<-S%d,term=%d, 成为leader", rf.me, serverId, rf.currentTerm)
 				//go rf.checkConsistency()
-				DPrintf("server[%d]Term[%d] became leader\n", rf.me, rf.currentTerm)
-				DPrintf3B("server[%d]Term[%d] start send heartbeat\n", rf.me, rf.currentTerm)
+				DPrintf3C("server[%d]Term[%d] became leader\n", rf.me, rf.currentTerm)
 				go rf.sendHeartBeats()
 			}
 		}
@@ -441,6 +465,7 @@ func (rf *Raft) electionNon() {
 
 	rf.state = Candidate
 	vote := 1
+	PrettyDebug(dCandidate, "S%d, election,term=%d", rf.me, rf.currentTerm)
 
 	args := RequestVoteArgs{
 		CandidiateTerm: rf.currentTerm,
@@ -476,69 +501,50 @@ func (rf *Raft) sendHeartBeats() {
 					PrevLogIndex: rf.nextIndex[i] - 1,
 					PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
 					//maybe not bug, just to pass the test
-					//Entries:      make([]LogEntry, 0), //empty entries for heartbeat
+					//Entries: make([]LogEntry, 0), //empty entries for heartbeat
 					//很快AE就会退化成HB，而且多次发送同一个AE不会有问题
 					Entries:      rf.log[rf.nextIndex[i]:],
 					LeaderCommit: rf.commitIndex,
 				}
 				DPrintf("i am server[%d], send HeartBeat for server[%d]\n", rf.me, i)
-				go rf.appendEntries(i, &args)
+				PrettyDebug(dTimer, "S%d->S%d, term=%d,heartbeat", rf.me, i, rf.currentTerm)
+				go rf.appendEntries(i, args)
 			}
 		}
 		rf.mu.Unlock()
 
-		time.Sleep(time.Duration(125) * time.Millisecond)
+		time.Sleep(time.Duration(50) * time.Millisecond)
 	}
 }
-
-/*
-// need to do something about log
-func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
-	reply := AppendEntriesReply{}
-	ok := rf.peers[serverId].Call("Raft.AppendEntriesHandler", args, &reply)
-	if !ok {
-		DPrintf("[AE]: something wrong happen\n")
-		return
-	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	//防止过去太长时间
-	if args.Term == rf.currentTerm && rf.state == Leader {
-		if reply.Success {
-			//donothing now
-			DPrintf("[AE]: server[%d]Term[%d] --> server[%d]Term[%d] success\n", rf.me, rf.currentTerm, serverId, reply.Term)
-		} else {
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.state = Follower
-				rf.votedFor = -1
-				rf.resetNon()
-			} else {
-				//consistency check false
-				DPrintf3B("heartbeat but concsistency check false\n")
-			}
-		}
-	}
-}
-*/
 
 func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	DPrintf3B("get [AE]: server[%d]Term[%d]->server[%d]Term[%d], %v\n loglen[%d]\n", args.LeaderId, args.Term, rf.me, rf.currentTerm,
+	defer rf.persist()
+	DPrintf3C("get [AE]: server[%d]Term[%d]->server[%d]Term[%d], %v\n loglen[%d]\n", args.LeaderId, args.Term, rf.me, rf.currentTerm,
 		*args, len(args.Entries))
-	DPrintf3B("server[%d] log before:\n", rf.me)
+	DPrintf3C("server[%d] log before:\n", rf.me)
+	PrettyDebug(dLog2, "S%d getAE, LeaderId=%d, prevlogindex=%d, prevlogterm=%d, leaderterm=%d, leadercommit=%d,entries len=%d",
+		rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term, args.LeaderCommit, len(args.Entries))
 	rf.PrintLog()
 	if args.Term < rf.currentTerm { //cannot be the leader
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		PrettyDebug(dLog2, "S%d getAE, Leader=%d term small, cannot be the leader now", rf.me, args.LeaderId)
 		return
+	}
+
+	if rf.currentTerm < args.Term {
+		PrettyDebug(dTerm, "S%d getAE, term=%d, changeto term=%d", rf.me, rf.currentTerm, args.Term)
+		rf.votedFor = -1
+		rf.currentTerm = args.Term
+		rf.state = Follower
 	}
 
 	//5.3
 	if len(rf.log)-1 < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("[AEH]: consistency fail")
+		PrettyDebug(dLog2, "S%d<-S%d, getAE, logConflict", rf.me, args.LeaderId)
 		reply.Success = false
 
 		//roll back quickly,XTerm,XIndex,XLen
@@ -554,6 +560,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 				}
 			}
 		}
+
 		return
 	}
 	//不能直接append，因为有可能出现一个bug：{1， 103，102}日志和{1， 103}日志同时发送过来；
@@ -562,6 +569,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	//rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 	//len1 := len(rf.log) - args.PrevLogIndex - 1
 	//len2 := len(args.Entries)
+	PrettyDebug(dLog2, "S%d logappend now, before loglen=%d", rf.me, len(rf.log)-1)
 	logEntryIndex := 0
 	logIndex := args.PrevLogIndex + 1
 	conflict := false
@@ -569,8 +577,10 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 		if args.Entries[logEntryIndex].Term != rf.log[logIndex].Term {
 			//conflict
 			rf.log = rf.log[:logIndex]
+			PrettyDebug(dLog2, "S%d,log conflict at=%d,LogEntriesIndex=%d,loglen=%d", rf.me, logIndex, logEntryIndex, len(rf.log)-1)
 			//persist
-			rf.persist()
+			//rf.persist()
+			//应该整个日志append完毕，才能进行持久化
 			conflict = true
 			break
 		}
@@ -580,7 +590,8 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 
 	if conflict {
 		rf.log = append(rf.log, args.Entries[logEntryIndex:]...)
-		rf.persist()
+		PrettyDebug(dLog2, "S%d,log conflict at=%d,append loglen=%d", rf.me, logIndex, len(rf.log)-1)
+		//rf.persist()
 	} else {
 		//no conflict
 		if logEntryIndex == len(args.Entries) && logIndex == len(rf.log) {
@@ -589,30 +600,28 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 			//do nothing
 		} else if logIndex == len(rf.log) {
 			rf.log = append(rf.log, args.Entries[logEntryIndex:]...)
-			rf.persist()
+			PrettyDebug(dLog2, "S%d,log conflict at=%d,append loglen=%d", rf.me, logIndex, len(rf.log)-1)
+			//rf.persist()
 		}
 	}
+	PrettyDebug(dLog2, "S%d,term=%d,log append,after: log len=%d,", rf.me, rf.currentTerm, len(rf.log)-1)
 
-	DPrintf3B("server[%d]Term[%d] log append success\n append after:\n", rf.me, rf.currentTerm)
-	rf.PrintLog()
+	if len(args.Entries) > 0 {
+		DPrintf3C("server[%d]Term[%d] log append success, log after\n", rf.me, rf.currentTerm)
+		rf.PrintLog()
+	}
+
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = minNumber(args.LeaderCommit, len(rf.log)-1)
+		PrettyDebug(dCommit, "S%d commitIndex=%d, loglen=%d", rf.me, rf.commitIndex, len(rf.log)-1)
 		rf.cond.Signal()
-	}
-	DPrintf("[AEH]: server[%d] append log success, log len is [%d]\n", rf.me, len(rf.log))
-	//rf.PrintLog()
-
-	if rf.currentTerm < args.Term {
-		rf.votedFor = -1
-		rf.currentTerm = args.Term
-		//persist
-		rf.persist()
 	}
 
 	rf.state = Follower
 	rf.resetNon()
 	reply.Success = true
 	reply.Term = rf.currentTerm
+
 }
 
 // 这个ticker包括两个timeout；
@@ -627,6 +636,7 @@ func (rf *Raft) ticker() {
 			rf.resetNon()
 		}
 		if time.Now().After(rf.electionTimeout) {
+			PrettyDebug(dTimer, "S%d, term=%d, timeout,election", rf.me, rf.currentTerm)
 			DPrintf("[TIMEOUT]: server[%d]Term[%d] timeout, start election\n", rf.me, rf.currentTerm)
 			rf.resetNon()
 			rf.electionNon()
@@ -645,6 +655,7 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 		rf.cond.Wait()
 
 		entries := make([]ApplyMsg, 0)
+		temp := rf.lastApplied
 		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
 			msg := ApplyMsg{
@@ -663,8 +674,14 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 
 		for i, _ := range entries {
 			ApplyCh <- entries[i]
+			PrettyDebug(dCommit, "S%d,apply command=%d index=%d success", rf.me, entries[i].Command, temp+i+1)
 		}
 	}
+}
+
+func (rf *Raft) signalPerSecond() {
+	time.Sleep(time.Duration(1) * time.Second)
+	rf.cond.Signal()
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -704,5 +721,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 
 	go rf.applyCommand(applyCh)
+	go rf.signalPerSecond()
 	return rf
 }

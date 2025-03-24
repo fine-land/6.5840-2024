@@ -36,8 +36,8 @@ func DPrintf3C(format string, a ...interface{}) {
 
 func (rf *Raft) PrintLog() {
 	DPrintf3B("server[%d] log len[%d], log is :\n", rf.me, len(rf.log)-1)
-	for _, v := range rf.log {
-		DPrintf3B("%v ", v)
+	for i, v := range rf.log {
+		DPrintf3C("%v %d", v, i)
 	}
 }
 
