@@ -1,6 +1,6 @@
 # 6.5840-2024
 
-# 分支说明
+# Branch Description
 - main，include lab1 mapreduce，lab2 kvserver，lab3A voteRequest
 - 3B，lab3B，there is a bug, look 3D branch for details;
 - 3C，lab3C, there is a bug, look 3D branch for details;
