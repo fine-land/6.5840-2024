@@ -1,7 +1,7 @@
 # 6.5840-2024
 
 # 分支说明
-- main分支，包括lab1 mapreduce，lab2 kvserver，lab3A voteRequest
-- 3B分支，lab3B
-- 3C分支，lab3C
-- raft的代码3A和3B各跑了500遍无错，如果各位发现错误，欢迎指出；后续也会发博客；
+- main，include lab1 mapreduce，lab2 kvserver，lab3A voteRequest
+- 3B，lab3B，there is a bug, look 3D branch for details;
+- 3C，lab3C, there is a bug, look 3D branch for details;
+- 3D, fix bugs in 3B，3C;
