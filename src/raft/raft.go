@@ -93,8 +93,8 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
@@ -134,7 +134,7 @@ func (rf *Raft) trimLogFromX(X int) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-	rf.trimLogFromX(0)
+	//rf.trimLogFromX(0)
 }
 
 // example RequestVote RPC handler.
@@ -273,18 +273,26 @@ func (rf *Raft) sendAppendEntries() {
 				LeaderId:     rf.me,
 				PrevLogIndex: rf.nextIndex[i] - 1,
 				PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
-				Entries:      rf.log[rf.nextIndex[i]:], //[rf.nextIndex ...]
+				//Entries:      rf.log[rf.nextIndex[i]:], //[rf.nextIndex ...]
 				LeaderCommit: rf.commitIndex,
 			}
+			//fix bug of slice and copy
+			//click the link to know more
+			//https://stackoverflow.com/questions/38923237/goroutines-sharing-slices-trying-to-understand-a-data-race
+			args.Entries = make([]LogEntry, len(rf.log[rf.nextIndex[i]:]))
+			copy(args.Entries, rf.log[rf.nextIndex[i]:])
 			DPrintf3C("server[%d]Term[%d] --> AElog for server[%d]\n", rf.me, rf.currentTerm, i)
 			PrettyDebug(dLeader, "S%d->S%d, term=%d, logappend, prevlogindex=%d, prevlogterm=%d, entrieslen=%d, leadercommit=%d",
 				rf.me, i, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit)
-			go rf.appendEntries(i, args)
+			go rf.appendEntries(i, &args)
 		}
 	}
 }
 
-func (rf *Raft) appendEntries(serverId int, args AppendEntriesArgs) {
+func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	//defer rf.persist()
 	reply := AppendEntriesReply{}
 	//这里如果当前服务器已经不是leader了，按照paper应当立刻停止发送；
 	//但是这样需要持有锁来检测当前服务器状态，但是发送RPC又不能持有锁；
@@ -293,14 +301,13 @@ func (rf *Raft) appendEntries(serverId int, args AppendEntriesArgs) {
 	//for !rf.peers[serverId].Call("Raft.AppendEntriesHandler", args, &reply) && rf.killed() == false {
 	//	time.Sleep(time.Duration(5) * time.Millisecond)
 	//}
-	ok := rf.peers[serverId].Call("Raft.AppendEntriesHandler", &args, &reply)
+	rf.mu.Unlock()
+	ok := rf.peers[serverId].Call("Raft.AppendEntriesHandler", args, &reply)
+	rf.mu.Lock()
 	if !ok {
 		return
 	}
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	defer rf.persist()
 	//这里也有一个bug
 	//leader1网络分区后，重连回来，立刻发送两个heartbeat给其他服务器；
 	//但是发送给Follower的先回来，修改了此服务器的term，导致从leader返回的heartbeat无法被处理
@@ -362,7 +369,7 @@ func (rf *Raft) appendEntries(serverId int, args AppendEntriesArgs) {
 				PrettyDebug(dLeader, "S%d->S%d,term冲突,Xterm=%d,XIndex=%d,XLen=%d,调整后nextIndex=%d",
 					rf.me, serverId, reply.XTerm, reply.XIndex, reply.XLen, rf.nextIndex[serverId])
 
-				go rf.appendEntries(serverId, AppendEntriesArgs{
+				go rf.appendEntries(serverId, &AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[serverId] - 1,
@@ -376,6 +383,7 @@ func (rf *Raft) appendEntries(serverId int, args AppendEntriesArgs) {
 		rf.tryUpdateCommitIndexNon()
 
 	}
+	rf.persist()
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -417,13 +425,17 @@ func (rf *Raft) resetNon() {
 
 // hold lock
 func (rf *Raft) callSendRequestVote(vote *int, args *RequestVoteArgs, serverId int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	reply := RequestVoteReply{}
+
+	rf.mu.Unlock()
 	ok := rf.sendRequestVote(serverId, args, &reply)
+	rf.mu.Lock()
+
 	if !ok {
 		DPrintf("[RV]: may be loss vote\n")
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if rf.currentTerm < reply.Term {
 		PrettyDebug(dCandidate, "S%d<-S%d, term=%d,ask vote, 有更大的term%d, state=Follower", rf.me, serverId, rf.currentTerm, args.CandidiateTerm)
 		rf.state = Follower
@@ -488,8 +500,8 @@ func (rf *Raft) sendHeartBeats() {
 		rf.mu.Lock()
 		//only NonLeader can do this
 		if rf.state != Leader { //dead lock fuck
-			DPrintf("server[%d] not leader now, quit\n", rf.me)
 			rf.mu.Unlock()
+			DPrintf("server[%d] not leader now, quit\n", rf.me)
 			return
 		}
 
@@ -503,30 +515,32 @@ func (rf *Raft) sendHeartBeats() {
 					//maybe not bug, just to pass the test
 					//Entries: make([]LogEntry, 0), //empty entries for heartbeat
 					//很快AE就会退化成HB，而且多次发送同一个AE不会有问题
-					Entries:      rf.log[rf.nextIndex[i]:],
+					//Entries:      rf.log[rf.nextIndex[i]:],
 					LeaderCommit: rf.commitIndex,
 				}
+
+				//fix bug of slice and copy
+				//click the link to know more
+				//https://stackoverflow.com/questions/38923237/goroutines-sharing-slices-trying-to-understand-a-data-race
+				args.Entries = make([]LogEntry, len(rf.log[rf.nextIndex[i]:]))
+				copy(args.Entries, rf.log[rf.nextIndex[i]:])
 				DPrintf("i am server[%d], send HeartBeat for server[%d]\n", rf.me, i)
 				PrettyDebug(dTimer, "S%d->S%d, term=%d,heartbeat", rf.me, i, rf.currentTerm)
-				go rf.appendEntries(i, args)
+				go rf.appendEntries(i, &args)
 			}
 		}
-		rf.mu.Unlock()
 
-		time.Sleep(time.Duration(50) * time.Millisecond)
+		rf.mu.Unlock()
+		time.Sleep(time.Duration(125) * time.Millisecond)
 	}
 }
 
 func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
-	DPrintf3C("get [AE]: server[%d]Term[%d]->server[%d]Term[%d], %v\n loglen[%d]\n", args.LeaderId, args.Term, rf.me, rf.currentTerm,
-		*args, len(args.Entries))
-	DPrintf3C("server[%d] log before:\n", rf.me)
+	//defer rf.persist()
 	PrettyDebug(dLog2, "S%d getAE, LeaderId=%d, prevlogindex=%d, prevlogterm=%d, leaderterm=%d, leadercommit=%d,entries len=%d",
 		rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term, args.LeaderCommit, len(args.Entries))
-	rf.PrintLog()
 	if args.Term < rf.currentTerm { //cannot be the leader
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -611,16 +625,22 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 		rf.PrintLog()
 	}
 
+	//如果发送signal信号时，Apply routine正在处理apply，那么就会收不到signal
+	//而后续也不会进行跟新，导致apply channel一直接收不到新的commit log
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = minNumber(args.LeaderCommit, len(rf.log)-1)
 		PrettyDebug(dCommit, "S%d commitIndex=%d, loglen=%d", rf.me, rf.commitIndex, len(rf.log)-1)
-		rf.cond.Signal()
+		//rf.cond.Signal()
 	}
 
+	//fix bug of signal missing
+	rf.cond.Signal()
 	rf.state = Follower
 	rf.resetNon()
 	reply.Success = true
 	reply.Term = rf.currentTerm
+
+	rf.persist()
 
 }
 
@@ -653,7 +673,7 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 	for rf.killed() == false {
 		rf.mu.Lock()
 		rf.cond.Wait()
-
+		PrettyDebug(dLog, "S%d,term=%d, rf.commitIndex=%d, rf.lastApplied=%d,len(rf.log)=%d", rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, len(rf.log)-1)
 		entries := make([]ApplyMsg, 0)
 		temp := rf.lastApplied
 		for rf.commitIndex > rf.lastApplied {
@@ -670,6 +690,7 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 			entries = append(entries, msg)
 		}
 		//rf.PrintLog()
+		PrettyDebug(dLog, "S%d need push %d,from index=%d to index%d", rf.me, len(entries), temp+1, rf.commitIndex)
 		rf.mu.Unlock()
 
 		for i, _ := range entries {
@@ -679,10 +700,10 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 	}
 }
 
-func (rf *Raft) signalPerSecond() {
-	time.Sleep(time.Duration(1) * time.Second)
-	rf.cond.Signal()
-}
+//func (rf *Raft) signalPerSecond() {
+//	time.Sleep(time.Duration(1) * time.Second)
+//	rf.cond.Signal()
+//}
 
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -721,6 +742,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 
 	go rf.applyCommand(applyCh)
-	go rf.signalPerSecond()
+	//go rf.signalPerSecond()
 	return rf
 }
