@@ -24,6 +24,7 @@
 
 
  -v: VERBOSE，默认不打印日志，设置为1表示打印日志； -n: 表示测试跑的数量； TestName: 表示你想跑的测试名称，可以是单独的某个函数，也可以是多个函数；比如3A，表示测试所有带有3A的函数；
+![image](https://github.com/user-attachments/assets/9a9311b1-a192-4e0d-a617-0ead47b05089)
 
 # Now
 - 3A,3B,3C,3D全部完成
