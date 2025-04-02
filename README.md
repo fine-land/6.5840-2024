@@ -5,7 +5,7 @@
 - 3B，lab3B，there are some bugs, look 3D branch for details;
 - 3C，lab3C, there are some bugs, look 3D branch for details;
 - 3D, fix bugs in 3B，3C;
-- 3D-fixd, lab3D；
+- 3D-fixed, lab3D；
 - finish all
 
 # Debug
