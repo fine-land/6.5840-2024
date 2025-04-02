@@ -34,10 +34,18 @@ func DPrintf3C(format string, a ...interface{}) {
 	}
 }
 
+const Debug3D = true
+
+func DPrintf3D(format string, a ...interface{}) {
+	if Debug3C {
+		log.Printf(format, a...)
+	}
+}
+
 func (rf *Raft) PrintLog() {
-	DPrintf3B("server[%d] log len[%d], log is :\n", rf.me, len(rf.log)-1)
+	DPrintf3D("server[%d] log len[%d], log is :\n", rf.me, len(rf.log)-1)
 	for i, v := range rf.log {
-		DPrintf3C("%v %d", v, i)
+		DPrintf3D("%v %d", v, i)
 	}
 }
 
@@ -58,6 +66,34 @@ func (args AppendEntriesArgs) String() string {
 	}
 	return s
 
+}
+
+func (rf *Raft) Global2LogNon(index int) int {
+	return index - rf.lastIncludedIndex
+}
+
+func (rf *Raft) Log2GlobalNon(index int) int {
+	return index + rf.lastIncludedIndex
+}
+
+func (rf *Raft) GetTermFromGlobalIndex(index int) int {
+	tmp := rf.Global2LogNon(index)
+	if tmp == 0 {
+		return rf.lastIncludedTerm
+	} else if tmp > 0 {
+		return rf.log[tmp].Term
+	} else {
+		PrettyDebug(dError, "S%d,term=%d,error index=%d,", rf.me, rf.currentTerm, tmp)
+	}
+	return -100
+}
+
+func (rf *Raft) GetTermFromLogIndex(index int) int {
+	if index == 0 {
+		return rf.lastIncludedTerm
+	} else {
+		return rf.log[index].Term
+	}
 }
 
 /*

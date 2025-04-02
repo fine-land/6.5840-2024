@@ -71,8 +71,16 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+
+	if rf.data == nil {
+		rf.persister.Save(raftstate, nil)
+	} else {
+		rf.persister.Save(raftstate, rf.data)
+	}
 }
 
 // restore previously persisted state.
@@ -101,6 +109,8 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []LogEntry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 
 	flag := false
 	if d.Decode(&currentTerm) != nil {
@@ -115,17 +125,41 @@ func (rf *Raft) readPersist(data []byte) {
 		flag = true
 		DPrintf3C("decode log fail\n")
 	}
+
+	if d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
+		flag = true
+	}
+
 	if !flag {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
+
+		rf.lastApplied = rf.lastIncludedIndex
+		rf.commitIndex = rf.lastIncludedIndex
 	}
+
+	//restore snapshot
+	rf.data = rf.persister.ReadSnapshot()
 }
 
-func (rf *Raft) trimLogFromX(X int) {
+func (rf *Raft) trimLog(index int) {
+	PrettyDebug(dSnap, "S%d,term=%d,snapshot,trim before: rf.lastincludedindex=%d,rflastincludedterm=%d,index=%d, loglen=%d",
+		rf.me, rf.currentTerm, rf.lastIncludedIndex, rf.lastIncludedTerm, index, len(rf.log)-1)
+
+	logindex := index - rf.lastIncludedIndex
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = rf.log[logindex].Term
+
 	log := rf.log[0:1]
-	log = append(log, rf.log[X:]...)
-	rf.log = log
+	log = append(log, rf.log[(logindex+1):]...)
+	rf.log = make([]LogEntry, len(log))
+	copy(rf.log, log)
+
+	PrettyDebug(dSnap, "S%d,term=%d,snapshot,trim after: rf.lastincludedindex=%d,rflastincludedterm=%d,index=%d, loglen=%d",
+		rf.me, rf.currentTerm, rf.lastIncludedIndex, rf.lastIncludedTerm, index, len(rf.log)-1)
 }
 
 // the service says it has created a snapshot that has
@@ -134,7 +168,26 @@ func (rf *Raft) trimLogFromX(X int) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-	//rf.trimLogFromX(0)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+
+	if index > rf.lastIncludedIndex+len(rf.log)-1 {
+		PrettyDebug(dInfo, "S%d,term=%d,snapshot, index out of range, index=%d, globalloglen=%d",
+			rf.me, rf.currentTerm, index, rf.lastIncludedIndex+len(rf.log)-1)
+		return
+	}
+
+	if index > rf.lastIncludedIndex {
+		rf.trimLog(index)
+		rf.data = make([]byte, len(snapshot))
+		copy(rf.data, snapshot)
+		//rf.hasSnapshot = true
+	} else {
+		PrettyDebug(dInfo, "S%d,term=%d,snapshot, get small snapshot index=%d,rf.lastincludedindex=%d", rf.me,
+			rf.currentTerm, index, rf.lastIncludedIndex)
+		return
+	}
 }
 
 // example RequestVote RPC handler.
@@ -168,8 +221,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//persist
 	}
 
-	lastLogIndex := len(rf.log) - 1
-	lastLogTerm := rf.log[lastLogIndex].Term
+	lastLogIndex := len(rf.log) - 1 + rf.lastIncludedIndex
+	//lastLogTerm := rf.log[rf.Global2LogNon(lastLogIndex)].Term
+	lastLogTerm := rf.GetTermFromGlobalIndex(lastLogIndex)
 	up2date := (args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex))
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && up2date {
 		rf.votedFor = args.CandidateId
@@ -247,13 +301,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, newlog)
 	rf.persist()
 	//DPrintf3C("[START]: server[%d]Term[%d] get log [%d]\n", rf.me, rf.currentTerm, command)
-	PrettyDebug(dLeader, "S%d, term=%d, start log %d, log len %d", rf.me, rf.currentTerm, command, len(rf.log)-1)
+	PrettyDebug(dLeader, "S%d, term=%d, start log %d, log len %d", rf.me, rf.currentTerm, command, len(rf.log)-1+rf.lastIncludedIndex)
 	//persist
-	rf.nextIndex[rf.me] = len(rf.log)
-	rf.matchIndex[rf.me] = len(rf.log) - 1
+	rf.nextIndex[rf.me] = len(rf.log) + rf.lastIncludedIndex
+	rf.matchIndex[rf.me] = len(rf.log) - 1 + rf.lastIncludedIndex
 
 	go rf.sendAppendEntries()
-	return len(rf.log) - 1, rf.currentTerm, true
+	return len(rf.log) - 1 + rf.lastIncludedIndex, rf.currentTerm, true
 }
 
 // 只有日志的时候才会进行这个函数，不是循环
@@ -267,20 +321,31 @@ func (rf *Raft) sendAppendEntries() {
 		if rf.state != Leader {
 			return
 		}
-		if i != rf.me && len(rf.log)-1 >= rf.nextIndex[i] {
+
+		if rf.nextIndex[i]-1 < rf.lastIncludedIndex {
+			//此时需要发送snapshot, 因为下一个需要发送的日志nextIndex[i]已经被快照了
+			go rf.SendInstallSnapshot(i)
+			continue
+		}
+
+		if i != rf.me && len(rf.log)-1 >= rf.nextIndex[i] /* && rf.nextIndex[i]-1 >= rf.lastIncludedIndex */ {
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
 				PrevLogIndex: rf.nextIndex[i] - 1,
-				PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
+				PrevLogTerm:/* rf.log[rf.Global2LogNon(rf.nextIndex[i]-1)].Term, */ rf.GetTermFromGlobalIndex(rf.nextIndex[i] - 1),
 				//Entries:      rf.log[rf.nextIndex[i]:], //[rf.nextIndex ...]
 				LeaderCommit: rf.commitIndex,
 			}
+
+			//if args.PrevLogIndex == rf.lastIncludedIndex {
+			//	args.PrevLogTerm = rf.lastIncludedTerm
+			//}
 			//fix bug of slice and copy
 			//click the link to know more
 			//https://stackoverflow.com/questions/38923237/goroutines-sharing-slices-trying-to-understand-a-data-race
-			args.Entries = make([]LogEntry, len(rf.log[rf.nextIndex[i]:]))
-			copy(args.Entries, rf.log[rf.nextIndex[i]:])
+			args.Entries = make([]LogEntry, len(rf.log[rf.Global2LogNon(rf.nextIndex[i]):]))
+			copy(args.Entries, rf.log[rf.Global2LogNon(rf.nextIndex[i]):])
 			DPrintf3C("server[%d]Term[%d] --> AElog for server[%d]\n", rf.me, rf.currentTerm, i)
 			PrettyDebug(dLeader, "S%d->S%d, term=%d, logappend, prevlogindex=%d, prevlogterm=%d, entrieslen=%d, leadercommit=%d",
 				rf.me, i, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit)
@@ -321,6 +386,7 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 			//如果在返回的时候，leader又更新了log，就会出现问题
 			//rf.nextIndex[serverId] = len(rf.log)
 			//rf.matchIndex[serverId] = len(rf.log) - 1
+			//args.PrevLogIndex已经是全局index，不需要再加上lastlogindex
 			newNextIndex := args.PrevLogIndex + len(args.Entries) + 1
 			newMatchIndex := args.PrevLogIndex + len(args.Entries)
 			if newNextIndex > rf.nextIndex[serverId] {
@@ -354,11 +420,11 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 					rf.nextIndex[serverId] = reply.XLen
 				} else {
 					//这里可以二分查找来加速,wait to do
-					for i := args.PrevLogIndex; i >= 0; i-- {
+					for i := rf.Global2LogNon(args.PrevLogIndex); i >= 0; i-- {
 						if rf.log[i].Term > reply.XTerm {
 							continue
 						} else if rf.log[i].Term == reply.XTerm {
-							rf.nextIndex[serverId] = i
+							rf.nextIndex[serverId] = rf.Log2GlobalNon(i)
 							break
 						} else {
 							rf.nextIndex[serverId] = reply.XIndex
@@ -366,17 +432,31 @@ func (rf *Raft) appendEntries(serverId int, args *AppendEntriesArgs) {
 						}
 					}
 				}
+
+				if rf.nextIndex[serverId] <= rf.lastIncludedIndex && rf.data != nil {
+					go rf.SendInstallSnapshot(serverId)
+					return
+				}
+
 				PrettyDebug(dLeader, "S%d->S%d,term冲突,Xterm=%d,XIndex=%d,XLen=%d,调整后nextIndex=%d",
 					rf.me, serverId, reply.XTerm, reply.XIndex, reply.XLen, rf.nextIndex[serverId])
 
-				go rf.appendEntries(serverId, &AppendEntriesArgs{
+				argsTmp := AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[serverId] - 1,
-					PrevLogTerm:  rf.log[rf.nextIndex[serverId]-1].Term,
-					Entries:      rf.log[rf.nextIndex[serverId]:],
+					PrevLogTerm:/* rf.log[rf.Global2LogNon(rf.nextIndex[serverId]-1)].Term, */ rf.GetTermFromGlobalIndex(rf.nextIndex[serverId] - 1),
 					LeaderCommit: rf.commitIndex,
-				})
+				}
+
+				//if argsTmp.PrevLogIndex == rf.lastIncludedIndex {
+				//	argsTmp.PrevLogTerm = rf.lastIncludedTerm
+				//}
+
+				argsTmp.Entries = make([]LogEntry, len(rf.log[rf.Global2LogNon(rf.nextIndex[serverId]):]))
+				copy(argsTmp.Entries, rf.log[rf.Global2LogNon(rf.nextIndex[serverId]):])
+
+				go rf.appendEntries(serverId, &argsTmp)
 			}
 		}
 
@@ -482,8 +562,8 @@ func (rf *Raft) electionNon() {
 	args := RequestVoteArgs{
 		CandidiateTerm: rf.currentTerm,
 		CandidateId:    rf.me,
-		LastLogIndex:   len(rf.log) - 1,
-		LastLogTerm:    rf.log[len(rf.log)-1].Term,
+		LastLogIndex:   len(rf.log) - 1 + rf.lastIncludedIndex,
+		LastLogTerm:    rf.GetTermFromLogIndex(len(rf.log) - 1),
 	}
 	for i, _ := range rf.peers {
 		if i != rf.me {
@@ -506,12 +586,12 @@ func (rf *Raft) sendHeartBeats() {
 		}
 
 		for i, _ := range rf.peers {
-			if i != rf.me {
+			if i != rf.me && rf.nextIndex[i]-1 >= rf.lastIncludedIndex {
 				args := AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[i] - 1,
-					PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
+					PrevLogTerm:/* rf.log[rf.Global2LogNon(rf.nextIndex[i]-1)].Term, */ rf.GetTermFromGlobalIndex(rf.nextIndex[i] - 1),
 					//maybe not bug, just to pass the test
 					//Entries: make([]LogEntry, 0), //empty entries for heartbeat
 					//很快AE就会退化成HB，而且多次发送同一个AE不会有问题
@@ -519,11 +599,14 @@ func (rf *Raft) sendHeartBeats() {
 					LeaderCommit: rf.commitIndex,
 				}
 
+				//if args.PrevLogIndex == rf.lastIncludedIndex {
+				//	args.PrevLogTerm = rf.lastIncludedTerm
+				//}
 				//fix bug of slice and copy
 				//click the link to know more
 				//https://stackoverflow.com/questions/38923237/goroutines-sharing-slices-trying-to-understand-a-data-race
-				args.Entries = make([]LogEntry, len(rf.log[rf.nextIndex[i]:]))
-				copy(args.Entries, rf.log[rf.nextIndex[i]:])
+				args.Entries = make([]LogEntry, len(rf.log[rf.Global2LogNon(rf.nextIndex[i]):]))
+				copy(args.Entries, rf.log[rf.Global2LogNon(rf.nextIndex[i]):])
 				DPrintf("i am server[%d], send HeartBeat for server[%d]\n", rf.me, i)
 				PrettyDebug(dTimer, "S%d->S%d, term=%d,heartbeat", rf.me, i, rf.currentTerm)
 				go rf.appendEntries(i, &args)
@@ -539,6 +622,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//defer rf.persist()
+
 	PrettyDebug(dLog2, "S%d getAE, LeaderId=%d, prevlogindex=%d, prevlogterm=%d, leaderterm=%d, leadercommit=%d,entries len=%d",
 		rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term, args.LeaderCommit, len(args.Entries))
 	if args.Term < rf.currentTerm { //cannot be the leader
@@ -546,6 +630,10 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 		reply.Success = false
 		PrettyDebug(dLog2, "S%d getAE, Leader=%d term small, cannot be the leader now", rf.me, args.LeaderId)
 		return
+	}
+
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		PrettyDebug(dInfo, "S%d<-S%d,term=%d,get outdata AE,args.PrevLogIndex=%d,rf.lastIncludedIndex=%d", rf.me, args.LeaderId, args.PrevLogIndex, rf.lastIncludedIndex)
 	}
 
 	if rf.currentTerm < args.Term {
@@ -556,25 +644,28 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	}
 
 	//5.3
-	if len(rf.log)-1 < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if len(rf.log)-1+rf.lastIncludedIndex < args.PrevLogIndex || /* rf.log[rf.Global2LogNon(args.PrevLogIndex)].Term */ rf.GetTermFromGlobalIndex(args.PrevLogIndex) != args.PrevLogTerm {
 		DPrintf("[AEH]: consistency fail")
-		PrettyDebug(dLog2, "S%d<-S%d, getAE, logConflict", rf.me, args.LeaderId)
+		PrettyDebug(dLog2, "S%d<-S%d, getAE, not consistency, rf.lastincludedIndex=%d,args.PrevLogIndex=%d, lenlog=%d,",
+			rf.me, args.LeaderId, rf.lastIncludedIndex, args.PrevLogIndex, len(rf.log)-1)
+		rf.PrintLog()
 		reply.Success = false
 
 		//roll back quickly,XTerm,XIndex,XLen
-		if len(rf.log)-1 < args.PrevLogIndex {
+		if len(rf.log)-1+rf.lastIncludedIndex < args.PrevLogIndex {
 			reply.XTerm = -1
-			reply.XLen = len(rf.log)
+			reply.XLen = len(rf.log) + rf.lastIncludedIndex
 		} else {
-			reply.XTerm = rf.log[args.PrevLogIndex].Term
-			for i := args.PrevLogIndex; i >= 0; i-- {
+			reply.XTerm = /* rf.log[rf.Global2LogNon(args.PrevLogIndex)].Term */ rf.GetTermFromGlobalIndex(args.PrevLogIndex)
+			for i := rf.Global2LogNon(args.PrevLogIndex); i >= 0; i-- {
 				if rf.log[i].Term != reply.XTerm {
-					reply.XIndex = i + 1
+					reply.XIndex = rf.Log2GlobalNon(i + 1)
 					break
 				}
 			}
 		}
 
+		PrettyDebug(dLog2, "S%d<-S%d, getAE, not consistency, after, XLen=%d,XTerm=%d,XIndex=%d", rf.me, args.LeaderId, reply.XLen, reply.XTerm, reply.XIndex)
 		return
 	}
 	//不能直接append，因为有可能出现一个bug：{1， 103，102}日志和{1， 103}日志同时发送过来；
@@ -583,15 +674,15 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	//rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 	//len1 := len(rf.log) - args.PrevLogIndex - 1
 	//len2 := len(args.Entries)
-	PrettyDebug(dLog2, "S%d logappend now, before loglen=%d", rf.me, len(rf.log)-1)
+	PrettyDebug(dLog2, "S%d logappend now, before loglen=%d", rf.me, len(rf.log)-1+rf.lastIncludedIndex)
 	logEntryIndex := 0
-	logIndex := args.PrevLogIndex + 1
+	logIndex := args.PrevLogIndex + 1 - rf.lastIncludedIndex
 	conflict := false
 	for logEntryIndex < len(args.Entries) && logIndex < len(rf.log) {
-		if args.Entries[logEntryIndex].Term != rf.log[logIndex].Term {
+		if args.Entries[logEntryIndex].Term != /* rf.log[logIndex].Term */ rf.GetTermFromLogIndex(logIndex) {
 			//conflict
 			rf.log = rf.log[:logIndex]
-			PrettyDebug(dLog2, "S%d,log conflict at=%d,LogEntriesIndex=%d,loglen=%d", rf.me, logIndex, logEntryIndex, len(rf.log)-1)
+			PrettyDebug(dLog2, "S%d,log conflict at=%d,LogEntriesIndex=%d,loglen=%d", rf.me, logIndex, logEntryIndex, len(rf.log)-1+rf.lastIncludedIndex)
 			//persist
 			//rf.persist()
 			//应该整个日志append完毕，才能进行持久化
@@ -604,7 +695,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 
 	if conflict {
 		rf.log = append(rf.log, args.Entries[logEntryIndex:]...)
-		PrettyDebug(dLog2, "S%d,log conflict at=%d,append loglen=%d", rf.me, logIndex, len(rf.log)-1)
+		PrettyDebug(dLog2, "S%d,log conflict at=%d,append loglen=%d", rf.me, logIndex, len(rf.log)-1+rf.lastIncludedIndex)
 		//rf.persist()
 	} else {
 		//no conflict
@@ -614,22 +705,22 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 			//do nothing
 		} else if logIndex == len(rf.log) {
 			rf.log = append(rf.log, args.Entries[logEntryIndex:]...)
-			PrettyDebug(dLog2, "S%d,log conflict at=%d,append loglen=%d", rf.me, logIndex, len(rf.log)-1)
+			PrettyDebug(dLog2, "S%d,log conflict at=%d,append loglen=%d", rf.me, logIndex, len(rf.log)-1+rf.lastIncludedIndex)
 			//rf.persist()
 		}
 	}
-	PrettyDebug(dLog2, "S%d,term=%d,log append,after: log len=%d,", rf.me, rf.currentTerm, len(rf.log)-1)
+	PrettyDebug(dLog2, "S%d,term=%d,log append,after: log len=%d,", rf.me, rf.currentTerm, len(rf.log)-1+rf.lastIncludedIndex)
 
-	if len(args.Entries) > 0 {
-		DPrintf3C("server[%d]Term[%d] log append success, log after\n", rf.me, rf.currentTerm)
-		rf.PrintLog()
-	}
+	//if len(args.Entries) > 0 {
+	//	DPrintf3C("server[%d]Term[%d] log append success, log after\n", rf.me, rf.currentTerm)
+	//	rf.PrintLog()
+	//}
 
 	//如果发送signal信号时，Apply routine正在处理apply，那么就会收不到signal
 	//而后续也不会进行跟新，导致apply channel一直接收不到新的commit log
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = minNumber(args.LeaderCommit, len(rf.log)-1)
-		PrettyDebug(dCommit, "S%d commitIndex=%d, loglen=%d", rf.me, rf.commitIndex, len(rf.log)-1)
+		rf.commitIndex = minNumber(args.LeaderCommit, len(rf.log)-1+rf.lastIncludedIndex)
+		PrettyDebug(dCommit, "S%d commitIndex=%d, loglen=%d", rf.me, rf.commitIndex, len(rf.log)-1+rf.lastIncludedIndex)
 		//rf.cond.Signal()
 	}
 
@@ -670,17 +761,69 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	for !rf.killed() {
+		//rf.mu.Lock()
+		//defer rf.mu.Unlock()
+		//rf.cond.Wait()
+		PrettyDebug(dLog, "S%d,term=%d,apply,lastapplied=%d,commitindex=%d,hasSnap=%v, lenlog=%d,rf.lastincludedindex=%d",
+			rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex, rf.hasSnapshot, len(rf.log)-1, rf.lastIncludedIndex)
+
+		if rf.hasSnapshot && rf.data != nil {
+			//may be send snapshot, but outdata? impossible
+			rf.hasSnapshot = false
+			if rf.lastApplied < rf.lastIncludedIndex {
+				rf.lastApplied = rf.lastIncludedIndex
+			}
+			msg := ApplyMsg{
+				SnapshotValid: true,
+				SnapshotTerm:  rf.lastIncludedTerm,
+				SnapshotIndex: rf.lastIncludedIndex,
+			}
+			msg.Snapshot = make([]byte, len(rf.data))
+			copy(msg.Snapshot, rf.data)
+			rf.mu.Unlock()
+			ApplyCh <- msg
+			rf.mu.Lock()
+			PrettyDebug(dCommit, "S%d,term=%d,apply snapshot success, rf.lastapplied=%d", rf.me, rf.currentTerm, rf.lastApplied)
+		}
+
+		PrettyDebug(dCommit, "S%d,term=%d,rf.lastApplied=%d,rf.commitIndex=%d,Globalloglen=%d", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex, rf.Log2GlobalNon(len(rf.log)-1))
+		if rf.lastApplied < rf.commitIndex && rf.lastApplied >= rf.lastIncludedIndex && rf.lastApplied < len(rf.log)-1+rf.lastIncludedIndex {
+			rf.lastApplied++
+			msg := ApplyMsg{
+				CommandValid: true,
+				CommandIndex: rf.lastApplied,
+				Command:      rf.log[rf.Global2LogNon(rf.lastApplied)].Op,
+			}
+			rf.mu.Unlock()
+			ApplyCh <- msg
+			rf.mu.Lock()
+			PrettyDebug(dCommit, "S%d,term=%d,applyindex=%d,success", rf.me, rf.currentTerm, rf.lastApplied)
+		} else {
+			rf.cond.Wait()
+		}
+
+	}
+}
+
+/*
+
+func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 	for rf.killed() == false {
 		rf.mu.Lock()
 		rf.cond.Wait()
-		PrettyDebug(dLog, "S%d,term=%d, rf.commitIndex=%d, rf.lastApplied=%d,len(rf.log)=%d", rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, len(rf.log)-1)
+		PrettyDebug(dLog, "S%d,term=%d, rf.commitIndex=%d, rf.lastApplied=%d,len(rf.log)=%d",
+			rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, len(rf.log)-1+rf.lastIncludedIndex)
 		entries := make([]ApplyMsg, 0)
 		temp := rf.lastApplied
 		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
 			msg := ApplyMsg{
 				CommandValid: true,
-				Command:      rf.log[rf.lastApplied].Op,
+				Command:      rf.log[rf.Global2LogNon(rf.lastApplied)].Op,
 				CommandIndex: rf.lastApplied,
 			}
 
@@ -690,7 +833,7 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 			entries = append(entries, msg)
 		}
 		//rf.PrintLog()
-		PrettyDebug(dLog, "S%d need push %d,from index=%d to index%d", rf.me, len(entries), temp+1, rf.commitIndex)
+		PrettyDebug(dLog, "S%d need push %d,from index=%d to index=%d", rf.me, len(entries), temp+1, rf.commitIndex)
 		rf.mu.Unlock()
 
 		for i, _ := range entries {
@@ -699,6 +842,8 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 		}
 	}
 }
+
+*/
 
 //func (rf *Raft) signalPerSecond() {
 //	time.Sleep(time.Duration(1) * time.Second)
@@ -735,6 +880,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.cond = sync.NewCond(&rf.mu)
 
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
+	rf.data = nil
+	rf.hasSnapshot = false
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 

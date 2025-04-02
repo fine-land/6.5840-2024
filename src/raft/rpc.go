@@ -54,6 +54,11 @@ type Raft struct {
 	electionTimeout time.Time //选举超时时间
 	state           int       //Follower, Candidate, Leader?
 	cond            *sync.Cond
+
+	lastIncludedIndex int
+	lastIncludedTerm  int
+	data              []byte
+	hasSnapshot       bool
 }
 
 type LogEntry struct {
@@ -105,12 +110,24 @@ type AppendEntriesReply struct {
 	XLen   int
 }
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
 // non hold lock
 // fix bugs
 // 每次选举成功都要重新初始化
 func (rf *Raft) updateNextIndexNon() {
 	for i, _ := range rf.peers {
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = len(rf.log) + rf.lastIncludedIndex
 		rf.matchIndex[i] = 0
 	}
 }
@@ -127,7 +144,7 @@ func maxNumber(x1, x2 int) int {
 // leader自己的matchIndex就是len(rf.log)-1
 func (rf *Raft) tryUpdateCommitIndexNon() {
 	PrettyDebug(dLeader, "S%d,term=%d,updatecommit index before=%d", rf.me, rf.currentTerm, rf.commitIndex)
-	rf.matchIndex[rf.me] = len(rf.log) - 1
+	rf.matchIndex[rf.me] = len(rf.log) - 1 + rf.lastIncludedIndex
 	maxMatchIndex := -1
 	for _, v := range rf.matchIndex {
 		maxMatchIndex = maxNumber(maxMatchIndex, v)
@@ -140,7 +157,7 @@ func (rf *Raft) tryUpdateCommitIndexNon() {
 				count++
 			}
 		}
-		if count > len(rf.peers)/2 && rf.log[N].Term == rf.currentTerm {
+		if count > len(rf.peers)/2 && /* rf.log[rf.Global2LogNon(N)].Term */ rf.GetTermFromGlobalIndex(N) == rf.currentTerm {
 			rf.commitIndex = N
 			break
 		}
