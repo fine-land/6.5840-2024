@@ -11,7 +11,7 @@
 # Debug
 - 使用6.5840的之前的MIT学生的脚本；
 - prettyDebug.go: 日志文件，不用管；
--dslogs.py: 
+- dslogs.py: 
 VERBOSE=1 go test -run "FuncName" > log      // FuncName:你想要测试的函数名称，test_test.go文件里
 python dslog.py -c 3 log > log.log // -c: 服务器数量;
 
