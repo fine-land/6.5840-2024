@@ -3,11 +3,15 @@ package kvraft
 import "6.5840/labrpc"
 import "crypto/rand"
 import "math/big"
+import "time"
 
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientId    int64 // unique client id
+	commandId   int64 // sequence number for operations
+	leaderId    int // current leader id
 }
 
 func nrand() int64 {
@@ -21,6 +25,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clientId = nrand() // generate a unique client id
+	ck.commandId = 0      // initialize command id to 0
+	ck.leaderId = 0 // initialize leader id to 0 (no leader known yet)
 	return ck
 }
 
@@ -37,6 +44,45 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	args := GetArgs{
+		Key:       key,
+		ClientId:  ck.clientId,
+		CommandId: ck.commandId,
+	}
+	ck.commandId++ // increment command id for the next operation	
+	reply := GetReply{}
+	for {
+		DPrintf("[client][Get], try get, key: %v, clientId: %v, commandId: %v, leaderId: %v", 
+		key, ck.clientId, ck.commandId, ck.leaderId)
+
+		ok := ck.servers[ck.leaderId].Call("KVServer.Get", &args, &reply)
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
+			// If the call fails or the leader is wrong, try the next server.
+			ck.leaderId = (ck.leaderId + 1) % (len(ck.servers))
+			DPrintf("[client][Get], err--!ok | WrongLeader | Timeout, ok: %v, clientId: %v, commandId: %v,reply.Err: %v", 
+	ok, args.ClientId, args.CommandId, reply.Err)
+			continue
+		} else if reply.Err == ErrNoKey {
+			// If the key does not exist, return an empty string.
+			DPrintf("[client][Get], NoKey ,key: %v, clientId: %v, commandId: %v,",
+			 args.Key, args.ClientId, args.CommandId)
+			return ""
+		} else if reply.Err == OK {
+			// If the operation is successful, return the value.
+			DPrintf("[client][Get], OK ,key: %v, clientId: %v, commandId: %v,",
+			 args.Key, args.ClientId, args.CommandId)
+			return reply.Value
+		} else if reply.Err == ErrOldRequest {
+			//do nothing
+			DPrintf("[client][Get], OldRequest ,key: %v, clientId: %v, commandId: %v,",
+			 args.Key, args.ClientId, args.CommandId)
+		} else {
+			//other fail
+			// ck.leaderId = (ck.leaderId + 1) % (len(ck.servers))
+		}
+		time.Sleep(100 * time.Millisecond) // wait before retrying
+	}
+	DPrintf("unreachableGet: %v", reply.Err)
 	return ""
 }
 
@@ -50,6 +96,37 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		ClientId:  ck.clientId,
+		CommandId: ck.commandId,	
+	}
+	ck.commandId++ // increment command id for the next operation
+	reply := PutAppendReply{}
+	for {
+		DPrintf("[client][%v], try, key: %v, value: %v, clientId: %v, commandId: %v, leaderId: %v", 
+		op, args.Key, args.Value, args.ClientId, args.CommandId, ck.leaderId)
+		ok := ck.servers[ck.leaderId].Call("KVServer."+op, &args, &reply)
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
+			// If the call fails or the leader is wrong, try the next server.
+			DPrintf("[client][%v], !ok | WrongLeader | Timeout, key: %v, value: %v, clientId: %v, commandId: %v, leaderId: %v, ok: %v, Err: %v", 
+		op, args.Key, args.Value, args.ClientId, args.CommandId, ck.leaderId, ok, reply.Err)
+			ck.leaderId = (ck.leaderId + 1) % (len(ck.servers))
+			continue
+		} else if reply.Err == OK {
+			// If the operation is successful, return.
+			DPrintf("[client][%v], OK, clientId: %v, commandId: %v", op, args.ClientId, args.CommandId)
+			return
+		} else if reply.Err == ErrOldRequest {
+			//do nothing
+			DPrintf("[client][%v], OldRequest, clientId: %v, commandId: %v", op, args.ClientId, args.CommandId)
+		} else {
+			//other fail
+			// ck.leaderId = (ck.leaderId + 1) % (len(ck.servers))
+		}
+		time.Sleep(100 * time.Millisecond) // wait before retrying
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
