@@ -6,6 +6,7 @@
 - 3C，lab3C, there are some bugs, look 3D branch for details;
 - 3D, fix bugs in 3B，3C;
 - 3D-fixed, lab3D；
+- 4A， lab4A
 - finish all
 
 # Debug
@@ -25,11 +26,12 @@
 
  -v: VERBOSE，默认不打印日志，设置为1表示打印日志； -n: 表示测试跑的数量； TestName: 表示你想跑的测试名称，可以是单独的某个函数，也可以是多个函数；比如3A，表示测试所有带有3A的函数；
 
-
-![image](https://github.com/user-attachments/assets/9a9311b1-a192-4e0d-a617-0ead47b05089)
+# Result
+![lab3all](https://github.com/user-attachments/assets/9a9311b1-a192-4e0d-a617-0ead47b05089)
+![lab4A](https://github.com/user-attachments/assets/3ec083fb-5b81-4bfa-a2e7-fc16b301174a)
 
 # Now
-- 3A,3B,3C,3D全部完成
-- 目前3A,3B,3C各跑500遍无错；3D跑了10遍无错；
+- 3A,3B,3C,3D,4A全部完成
+- 目前3A,3B,3C各跑500遍无错；3D跑50遍无措；
 - 如有错误，欢迎指出；
 - 博客会在近期放出；
