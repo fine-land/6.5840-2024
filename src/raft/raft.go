@@ -25,6 +25,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	//"os"
+	//"fmt"
 
 	//	"6.5840/labgob"
 	"6.5840/labgob"
@@ -302,6 +304,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.persist()
 	//DPrintf3C("[START]: server[%d]Term[%d] get log [%d]\n", rf.me, rf.currentTerm, command)
 	PrettyDebug(dLeader, "S%d, term=%d, start log %d, log len %d", rf.me, rf.currentTerm, command, len(rf.log)-1+rf.lastIncludedIndex)
+	//f, _ := os.OpenFile("special.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	//defer f.Close()
+	//fmt.Fprintf(f, "S%d, term=%d, start log: %v\n", rf.me, rf.currentTerm, len(rf.log) - 1 + rf.lastIncludedIndex)
 	//persist
 	rf.nextIndex[rf.me] = len(rf.log) + rf.lastIncludedIndex
 	rf.matchIndex[rf.me] = len(rf.log) - 1 + rf.lastIncludedIndex
@@ -721,6 +726,10 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = minNumber(args.LeaderCommit, len(rf.log)-1+rf.lastIncludedIndex)
 		PrettyDebug(dCommit, "S%d commitIndex=%d, loglen=%d", rf.me, rf.commitIndex, len(rf.log)-1+rf.lastIncludedIndex)
+		//f, _ := os.OpenFile("special.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		//defer f.Close()
+		//fmt.Fprintf(f, "S%d, commit index: %v, term = %d, loglen=%d\n", 
+		//	rf.me, rf.commitIndex, rf.currentTerm, len(rf.log)-1+rf.lastIncludedIndex)
 		//rf.cond.Signal()
 	}
 
@@ -761,8 +770,14 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
+	//f, _ := os.OpenFile("special.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+//defer f.Close()
+
+	//fmt.Fprintf(f, "S%d, applyCommand, cindex: %d, lastApplied: %d\n", rf.me, rf.commitIndex, rf.lastApplied)
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 
 	for !rf.killed() {
 		//rf.mu.Lock()
@@ -770,7 +785,7 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 		//rf.cond.Wait()
 		PrettyDebug(dLog, "S%d,term=%d,apply,lastapplied=%d,commitindex=%d,hasSnap=%v, lenlog=%d,rf.lastincludedindex=%d",
 			rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex, rf.hasSnapshot, len(rf.log)-1, rf.lastIncludedIndex)
-
+		//fmt.Fprintf(f, "S%d, commitindex=%d, lastAppliedIndex=%d\n", rf.me, rf.commitIndex, rf.lastApplied)
 		if rf.hasSnapshot && rf.data != nil {
 			//may be send snapshot, but outdata? impossible
 			rf.hasSnapshot = false
@@ -785,11 +800,15 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 			msg.Snapshot = make([]byte, len(rf.data))
 			copy(msg.Snapshot, rf.data)
 			rf.mu.Unlock()
+			//DPrintf("apply msg, index = %v", rf.lastApplied)
+			//fmt.Fprintf(f, "S%d, apply index: %v snapshot, success\n", rf.lastApplied)
 			ApplyCh <- msg
 			rf.mu.Lock()
 			PrettyDebug(dCommit, "S%d,term=%d,apply snapshot success, rf.lastapplied=%d", rf.me, rf.currentTerm, rf.lastApplied)
 		}
-
+		
+		//fmt.Fprintf(f, "come to here, S%d, commitindex: %v, lastAppliedIndex: %v\n", rf.me, rf.commitIndex,
+	//rf.lastApplied)
 		PrettyDebug(dCommit, "S%d,term=%d,rf.lastApplied=%d,rf.commitIndex=%d,Globalloglen=%d", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex, rf.Log2GlobalNon(len(rf.log)-1))
 		if rf.lastApplied < rf.commitIndex && rf.lastApplied >= rf.lastIncludedIndex && rf.lastApplied < len(rf.log)-1+rf.lastIncludedIndex {
 			rf.lastApplied++
@@ -797,13 +816,19 @@ func (rf *Raft) applyCommand(ApplyCh chan ApplyMsg) {
 				CommandValid: true,
 				CommandIndex: rf.lastApplied,
 				Command:      rf.log[rf.Global2LogNon(rf.lastApplied)].Op,
+				CommandTerm:  rf.log[rf.Global2LogNon(rf.lastApplied)].Term,
 			}
 			rf.mu.Unlock()
+				//fmt.Fprintf(f, "S%d, rf.commitindex: %v, rf.lastappliedindex: %v, 卡死了\n", 
+				//rf.me, rf.commitIndex, rf.lastApplied)
 			ApplyCh <- msg
 			rf.mu.Lock()
+			//fmt.Fprintf(f, "S%d, apply index = %v ok\n", rf.me, rf.lastApplied)
 			PrettyDebug(dCommit, "S%d,term=%d,applyindex=%d,success", rf.me, rf.currentTerm, rf.lastApplied)
 		} else {
+			//fmt.Fprintf(f, "S%d, waiton cond, lastappliedindex=%d, commitindex=%d\n", rf.me, rf.lastApplied, rf.commitIndex)
 			rf.cond.Wait()
+			//fmt.Fprintf(f, "S%d, wake up from cond, lastappliedindex=%d, commitindex=%d\n", rf.me, rf.lastApplied, rf.commitIndex)
 		}
 
 	}

@@ -22,6 +22,7 @@ type Op struct {
 	OpType    string // "Get", "Put", or "Append"
 	ClientId  int64 // unique client id
 	CommandId int64 // sequence number for operations
+	Term      int   //there one bug, if not have this; see also (4);
 }
 
 type LastResult struct {
@@ -85,11 +86,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	//avoid raft deadlock
 	kv.mu.Unlock()
 	// Send the operation to Raft
-	index, _, isLeader := kv.rf.Start(op)
+	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	op.Term = term
 	// Create a channel to wait for the reply
 	ch := make(chan LastResult)
 
@@ -155,11 +157,12 @@ func (kv *KVServer) putAppend(args *PutAppendArgs, reply *PutAppendReply, opType
 		CommandId: args.CommandId,
 	}
 	// Send the operation to Raft
-	index, _, isLeader := kv.rf.Start(op)
+	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	op.Term = term
 	// Create a channel to wait for the reply
 	ch := make(chan LastResult)
 	kv.mu.Lock()
@@ -258,6 +261,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 func (kv *KVServer) applyLoop() {
 	for !kv.killed(){
+		isL := true
 		DPrintf("try get msg, now lastAppliedIndex: %v", kv.lastAppliedIndex)
 		msg := <- kv.applyCh  //something wrong happened ...
 		DPrintf("get msg, index: %v", msg.CommandIndex)
@@ -271,19 +275,33 @@ func (kv *KVServer) applyLoop() {
 			op := msg.Command.(Op) // type assertion to get the Op from the Command
 			DPrintf("[server],getapplyCh, clientId: %v, commandId: %v, op: %v, logindex: %v, lastAppliedIndex: %v, key: %v, value: %v",
 			op.ClientId, op.CommandId, op.OpType, msg.CommandIndex, kv.lastAppliedIndex, op.Key, op.Value)
-			// if op.CommandId <= kv.lastApplied[op.ClientId].CommandId{
-			// 	kv.mu.Unlock()
-			// 	//虽然我觉得是不可能的，但是还是加上这个判断
-			// 	//这种情况下，raft的日志小于等于最后一次的结果，证明
-			// 	//这个操作已经被处理过了，我们直接返回lastresult
-			// 	lr := LastResult{
-			// 		Err: ErrOldRequest,
-			// 		Value: "",
-			// 	}
-			// 	kv.channelMap[msg.CommandIndex] <- lr
-			// 	continue
-			// }
+			//bugs need to fix
+			if lrop, ok := kv.lastApplied[op.ClientId]; ok && op.CommandId <= lrop.CommandId {
+				DPrintf("[server] commandId: %v, ok: %v, op.commandId <= commandId, errrrrrrr", lrop.CommandId, ok)
+				//如果多次发送同一个指令，则只会处理一次；
+				//虽然我觉得是不可能的，但是还是加上这个判断
+				//这种情况下，raft的日志小于等于最后一次的结果，证明
+				//这个操作已经被处理过了，我们直接返回lastresult
+				//并且不需要提交到state machine了
+				lr := LastResult{
+					Err: ErrOldRequest,
+					Value: "",
+				}
+				if ch, ok := kv.channelMap[msg.CommandIndex]; ok {
+					kv.mu.Unlock()
+					ch <- lr
+				} else {
+					kv.mu.Unlock()
+				}
+				continue
+			}
 			
+			kv.mu.Unlock()
+			if _, isLeader := kv.rf.GetState(); !isLeader {
+				isL = false
+			} 
+
+			kv.mu.Lock()
 			//update kv.store, kv.lastApplied, kv.channelMap
 			var lr LastResult
 			switch(op.OpType) {
@@ -316,15 +334,22 @@ func (kv *KVServer) applyLoop() {
 				}
 			}
 			kv.lastApplied[op.ClientId] = lr // update the last applied map
-			kv.mu.Unlock() // unlock the mutex before sending the result
+			//kv.mu.Unlock() // unlock the mutex before sending the result
 			if ch, ok := kv.channelMap[msg.CommandIndex]; ok {
+				kv.mu.Unlock()
+				//此时，记录的是最新的一次日志；但是返回的是ErrWrongLeader
+				if isL == false {
+					lr.Err = ErrWrongLeader
+				}
 				ch <- lr // send the result to the channel
 			}else {
 				//如果这个log的channel已经被关闭了，说明timeout了，直接continue；因为结果已经被
 				//记录到lastApplied里面了；无所谓丢失；
+				kv.mu.Unlock()
 				continue
 			}
 		} else if msg.SnapshotValid {
+			// kv.mu.Unlock()
 			//wait to do ...
 		}
 	} //end for loop

@@ -3,7 +3,8 @@ package raft
 import (
 	"sync"
 	"time"
-
+	//"os"
+	//"fmt"
 	"6.5840/labrpc"
 )
 
@@ -20,7 +21,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-
+	CommandTerm  int
 	// For 3D:
 	SnapshotValid bool
 	Snapshot      []byte
@@ -164,5 +165,8 @@ func (rf *Raft) tryUpdateCommitIndexNon() {
 
 	}
 	PrettyDebug(dLeader, "S%d,term=%d,updatecommit index after=%d", rf.me, rf.currentTerm, rf.commitIndex)
+	//f, _ := os.OpenFile("special.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	//defer f.Close()
+	//fmt.Fprintf(f, "S%d, term=%d, updatecommit index after: %d, signal\n", rf.me, rf.currentTerm, rf.commitIndex)
 	rf.cond.Signal()
 }
