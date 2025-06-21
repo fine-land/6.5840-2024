@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"bytes"
 )
 
 
@@ -46,6 +47,9 @@ type KVServer struct {
 	lastApplied map[int64]LastResult // maps clientId to LastResult
 	channelMap map[int]chan LastResult // maps logindex to channel for waiting replies
 	lastAppliedIndex int
+
+
+	lastTime time.Time
 }
 
 
@@ -254,7 +258,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.channelMap = make(map[int]chan LastResult) // initialize the channel map
 	kv.lastAppliedIndex = 0 // initialize the last applied index
 
+	kv.lastTime = time.Now() 
+
+	kv.readSnapshot(persister.ReadSnapshot())
+	// kv.lastAppliedIndex = kv.rf.LastIncludedIndex() // set the last applied index from the snapshot
 	go kv.applyLoop() // start the apply loop to process Raft messages
+	// go kv.Snapshot()
 	return kv
 }
 
@@ -265,6 +274,7 @@ func (kv *KVServer) applyLoop() {
 		DPrintf("try get msg, now lastAppliedIndex: %v", kv.lastAppliedIndex)
 		msg := <- kv.applyCh  //something wrong happened ...
 		DPrintf("get msg, index: %v", msg.CommandIndex)
+
 		if msg.CommandValid {
 			kv.mu.Lock()
 			if msg.CommandIndex <= kv.lastAppliedIndex {
@@ -301,6 +311,13 @@ func (kv *KVServer) applyLoop() {
 				isL = false
 			} 
 
+
+			now := time.Now()
+			if isL {
+				DPrintf4B("apply index=%v, time consume: %v\n", msg.CommandIndex, now.Sub(kv.lastTime))
+				kv.lastTime = now
+			}
+
 			kv.mu.Lock()
 			//update kv.store, kv.lastApplied, kv.channelMap
 			var lr LastResult
@@ -334,6 +351,12 @@ func (kv *KVServer) applyLoop() {
 				}
 			}
 			kv.lastApplied[op.ClientId] = lr // update the last applied map
+
+			//snapshot
+			if kv.maxraftstate != -1 && kv.maxraftstate <= kv.rf.RaftStateSize() {
+				kv.Snapshot()
+			}
+
 			//kv.mu.Unlock() // unlock the mutex before sending the result
 			if ch, ok := kv.channelMap[msg.CommandIndex]; ok {
 				kv.mu.Unlock()
@@ -351,6 +374,68 @@ func (kv *KVServer) applyLoop() {
 		} else if msg.SnapshotValid {
 			// kv.mu.Unlock()
 			//wait to do ...
+			kv.mu.Lock()
+
+			if kv.lastAppliedIndex < msg.SnapshotIndex {
+				kv.readSnapshot(msg.Snapshot)
+				kv.lastAppliedIndex = msg.SnapshotIndex
+			}
+
+			kv.mu.Unlock()
 		}
 	} //end for loop
+}
+
+
+func (kv *KVServer) readSnapshot(sp []byte) {
+	if sp == nil || len(sp) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(sp)
+	d := labgob.NewDecoder(r)
+	var lastApplied map[int64]LastResult
+	var store map[string]string
+
+	if d.Decode(&lastApplied) != nil ||
+		d.Decode(&store) != nil {
+		DPrintf("error to read snapshot")
+	} else {
+		kv.lastApplied = lastApplied
+		kv.store = store
+	}
+}
+
+
+// func (kv *KVServer) Snapshot() {
+// 	for(!kv.killed()){
+// 		//kv.mu.Lock()
+
+// 		if kv.maxraftstate == -1 || kv.maxraftstate < kv.rf.RaftStateSize() {
+// 			kv.mu.Unlock()
+// 			time.Sleep(100 * time.Millisecond)
+// 		} else if kv.maxraftstate >= kv.rf.RaftStateSize() {
+// 			w := new(bytes.Buffer)
+// 			e := labgob.NewEncoder(w)
+
+// 			kv.mu.Lock()
+// 			e.Encode(kv.lastApplied)
+// 			e.Encode(kv.store)
+// 			kv.mu.Unlock()
+
+// 			sp := w.Bytes()
+// 			kv.rf.Snapshot(kv.lastAppliedIndex, sp)
+// 		}
+// 	}
+// }
+
+func (kv *KVServer) Snapshot() {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(kv.lastApplied)
+	e.Encode(kv.store)
+
+	sp := w.Bytes()
+	kv.rf.Snapshot(kv.lastAppliedIndex, sp)
 }

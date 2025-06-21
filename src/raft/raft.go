@@ -919,3 +919,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//go rf.signalPerSecond()
 	return rf
 }
+
+
+func (rf *Raft) RaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.RaftStateSize()
+}

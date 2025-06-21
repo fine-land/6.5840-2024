@@ -50,6 +50,16 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+
+const Debug4B = true
+
+func DPrintf4B(format string, a ...interface{}) (n int, err error) {
+	if Debug4B {
+		log.Printf(format, a...)
+	}
+	return
+}
+
 func (e Err) String() string {
 	switch e {
 	case OK:
