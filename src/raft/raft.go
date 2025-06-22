@@ -333,7 +333,7 @@ func (rf *Raft) sendAppendEntries() {
 			continue
 		}
 
-		if i != rf.me && len(rf.log)-1 >= rf.nextIndex[i] /* && rf.nextIndex[i]-1 >= rf.lastIncludedIndex */ {
+		if i != rf.me && len(rf.log)-1+rf.lastIncludedIndex >= rf.nextIndex[i] /* && rf.nextIndex[i]-1 >= rf.lastIncludedIndex */ {
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
