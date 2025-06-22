@@ -7,6 +7,7 @@
 - 3D, fix bugs in 3B，3C;
 - 3D-fixed, lab3D；
 - 4A， lab4A
+- 4B   lab4B
 - finish all
 
 # Debug
@@ -29,9 +30,10 @@
 # Result
 ![lab3all](https://github.com/user-attachments/assets/9a9311b1-a192-4e0d-a617-0ead47b05089)
 ![lab4A](https://github.com/user-attachments/assets/3ec083fb-5b81-4bfa-a2e7-fc16b301174a)
+![lab4B](https://github.com/user-attachments/assets/4ad6b225-d2bb-4054-a94d-ceb6aa73c082)
 
 # Now
-- 3A,3B,3C,3D,4A全部完成
+- 3A,3B,3C,3D,4A,4B全部完成
 - 目前3A,3B,3C各跑500遍无错；3D跑50遍无措；
 - 如有错误，欢迎指出；
 - 博客会在近期放出；
