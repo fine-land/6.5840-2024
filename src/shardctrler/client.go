@@ -12,6 +12,9 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	clientId  int64 // unique client id
+	commandId int64 // sequence number for operations
+	leaderId  int // current leader id
 }
 
 func nrand() int64 {
@@ -25,6 +28,10 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clientId = nrand() // generate a unique client id
+	ck.commandId = 0      // initialize command id to 0
+	ck.leaderId = 0       // initialize leader id to 0 
+
 	return ck
 }
 
@@ -46,20 +53,27 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
-
+	args := &JoinArgs{
+		Servers:   servers,
+		ClientId:  ck.clientId,
+		CommandId: ck.commandId,
+	}
+	ck.commandId++ // increment command id for the next operation
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
-			}
+		var reply JoinReply
+		ok := ck.servers[ck.leaderId].Call("ShardCtrler.Join", args, &reply)
+		if !ok || reply.Err == ErrTimeout || reply.WrongLeader {
+			// If the call fails or the leader is wrong, retry.
+			DPrintf5A("Join, maybe !ok | timeout | wrongleader, clientId: %v, commandId: %v, leaderId: %v, 
+			ok: %v, reply.Err: %v, reply.WrongLeader: %v", args.ClientId, args.CommandId, ck.leaderId, 
+			ok, reply.Err, reply.WrongLeader)
+
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			continue
+		} else if ok && reply.WrongLeader == false {
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond) 
 	}
 }
 
