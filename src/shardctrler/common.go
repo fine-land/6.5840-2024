@@ -1,5 +1,9 @@
 package shardctrler
 
+import (
+	"log"
+	"strconv"
+)
 //
 // Shard controller: assigns shards to replication groups.
 //
@@ -103,6 +107,15 @@ func DPrintf5A(format string, a ...interface{}) {
 }
 
 
+
+const Debug5 = false
+
+func DPrintf5(format string, a ...interface{}) {
+	if Debug5 {
+		log.Printf(format, a...)
+	}
+}
+
 func (e Err) String() string {
 	switch e {
 	case OK:
@@ -112,4 +125,28 @@ func (e Err) String() string {
 	default:
 		return "Unknown Error"
 	}
+}
+
+
+func (c *Config) String() string {
+	s := "{ Num: " + strconv.Itoa(c.Num) + ", Shards: ["
+	for i, gid := range c.Shards {
+		if i > 0 {
+			s += ", "
+		}
+		s += strconv.Itoa(gid)
+	}
+	s += "], Groups: {"
+	for gid, servers := range c.Groups {
+		s += strconv.Itoa(gid) + ": ["
+		for i, server := range servers {
+			if i > 0 {
+				s += ", "
+			}
+			s += server
+		}
+		s += "]"
+	}
+	s += " } }"
+	return s
 }
