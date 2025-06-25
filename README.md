@@ -8,6 +8,7 @@
 - 3D-fixed, lab3D；
 - 4A， lab4A
 - 4B   lab4B
+- 5A   lab5A
 - finish all
 
 
@@ -37,7 +38,8 @@
 ![lab4B](https://github.com/user-attachments/assets/4ad6b225-d2bb-4054-a94d-ceb6aa73c082)
 
 # Now
-- 3A,3B,3C,3D,4A,4B全部完成
+- 预计7月15日左右全部完成
+- 3A,3B,3C,3D,4A,4B,5A全部完成
 - 目前3A,3B,3C各跑500遍无错；3D跑50遍无措；
 - 如有错误，欢迎指出；
-- 博客会在近期放出；
+- 博客会在8月前放出；
