@@ -324,11 +324,13 @@ func (sc *ShardCtrler) applyCommands() {
 				for gid, servers := range sc.configs[len(sc.configs)-1].Groups {
 					c.Groups[gid] = append([]string{}, servers...) // deep copy
 				}
+				//DPrintf5("first Join operation, new config: %v\n", c)
 				for gid, servers := range op.Servers{
 					if _, exists := c.Groups[gid]; !exists {
 						c.Groups[gid] = append([]string{}, servers...)  //may do not need deep copy，but for safety
 					}
 				}
+				//DPrintf5("second Join operation, new config: %v\n", c)
 				c.Shards = sc.configs[len(sc.configs)-1].Shards // copy the shards from the last config
 				rebalanceShards(c)
 				lr = LastResult{
@@ -344,18 +346,22 @@ func (sc *ShardCtrler) applyCommands() {
 				for gid, servers := range sc.configs[len(sc.configs)-1].Groups {
 					c.Groups[gid] = append([]string{}, servers...) // deep copy
 				}
+				marked := make([]bool, len(c.Shards))
 				for _, gid := range op.GIDs {
+					DPrintf5("len op.GIDs: %v, gid: %v, GIDs %v\n", len(op.GIDs), gid, op.GIDs)
 					if _, exists := c.Groups[gid]; exists {
 						delete(c.Groups, gid) // remove the group
 					}
 					for i := 0; i < NShards; i++ {
 						if sc.configs[len(sc.configs)-1].Shards[i] == gid {
 							c.Shards[i] = 0 // reassign the shard to group 0
-						} else {
+							marked[i] = true // mark this shard as reassigned
+						} else if !marked[i] {
 							c.Shards[i] = sc.configs[len(sc.configs)-1].Shards[i] // keep the shard in the same group
 						}
 					}
 				}
+				DPrintf5("Leave operation, new config, multi leave: %v\n", c)
 				rebalanceShards(c)
 				lr = LastResult{
 					CommandId: op.CommandId,
@@ -424,7 +430,7 @@ func (sc *ShardCtrler) applyCommands() {
    然后统计每个
 */
 func rebalanceShards(config *Config){
-	DPrintf5("config: %v\n", config)
+	//DPrintf5("config: %v\n", config)
 	// Rebalance shards across groups
 	// This is a simplified version, you may want to implement a more sophisticated balancing algorithm
 	shardCount := len(config.Shards)
@@ -483,7 +489,7 @@ func rebalanceShards(config *Config){
 		} else {
 			target = avg
 		}
-
+		//DPrintf5("gid: %v, shardsPerGroup[gid]: %v, target: %v\n", gid, shardsPerGroup[gid], target)
 		//如果gid的shards大于target，则从头开始遍历shards，取序号小的进入move数组
 		if shardsPerGroup[gid] > target {
 			diff := shardsPerGroup[gid] - target
@@ -495,10 +501,12 @@ func rebalanceShards(config *Config){
 			}
 		} else if shardsPerGroup[gid] < target {
 			diff := target - shardsPerGroup[gid]
-			for _, j := range needMove {
-				if diff > 0 {
+			//DPrintf5("gid: %v, diff: %v, needMove: %v\n", gid, diff, needMove)
+			for index, j := range needMove {
+				if diff > 0 && j < shardCount {				
 					config.Shards[j] = gid
 					diff--
+					needMove[index] = shardCount
 				}
 			}
 		} else {
@@ -506,7 +514,7 @@ func rebalanceShards(config *Config){
 		}
 	}
 
-	DPrintf5("after rebalanceShards, config: %v\n", config)
+	//DPrintf5("after rebalanceShards, config: %v\n", config)
 	if len(needMove) != 0 {
 		DPrintf5A("something wrong happen in rebalanceShards\n")
 	}
